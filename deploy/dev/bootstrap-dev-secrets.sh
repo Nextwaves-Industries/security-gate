@@ -10,7 +10,11 @@
 #   mqtt_password                    broker password for user gate-dev
 #   mosquitto_passwd                 hashed password file for mosquitto
 #
-# Idempotent: existing files are kept unless --force is given.
+# Runs only if secrets/api_token is absent or --force is given. When it runs
+# it deletes and regenerates the whole secrets/ directory. Certificates are
+# valid for 825 days. The directory is deliberately world-readable so both
+# containers (uid 10001 and 1883) can read their files; mqtt_password is also
+# mounted into the broker for its healthcheck.
 # Never use this output on a customer gate.
 set -eu
 

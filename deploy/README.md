@@ -1,30 +1,10 @@
 # Nextwaves Gate Service deployment
 
 The target is a Linux x86_64 host running Docker Engine directly, Docker
-Compose v2 and Python 3.8+ (used only by the acceptance checker). One Compose
+Compose v2 and Python 3.8+ (used only by `validate-running.sh`). One Compose
 project owns one physical NR155 gate. Do not start the desktop runtime against
-the same serial interfaces.
-
-## Runtime structure
-
-The container entrypoint remains `python -m gate_service.main`. The headless
-package is split by responsibility so desktop adapters and transport code do
-not leak into the hardware/domain core:
-
-```text
-gate_service.main                 thin process entrypoint
-  -> gate_service.application     composition, REST/gRPC and shutdown order
-     -> gate_service.reader_engine    transaction, passage and gate state
-        -> gate_service.reader_protocol  VM64/ZK parsing and inventory commands
-        -> rfid_portal.*              SQLite, outbox and domain services
-     -> gate_service.api.*        REST/gRPC transport adapters
-     -> gate_service.event_bus    live fan-out and MQTT event bridge
-```
-
-`gate_service.contracts` is the stable boundary used by control/API adapters.
-Protocol names, HTTP routes, gRPC schema, MQTT topics, entrypoint, persistent
-paths and Compose device mappings are compatibility boundaries and must not be
-changed by internal refactors.
+the same serial interfaces. Follow sections 1 to 5 in order; the preflight
+script enforces every ownership and permission rule stated here.
 
 ## 1. Obtain the signed image
 
@@ -51,14 +31,19 @@ sudo install -d -m 0750 /opt/nextwaves-gate/deploy
 sudo install -d -o 0 -g 10001 -m 0750 /etc/nextwaves-gate/secrets
 sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/nextwaves-gate
 sudo cp deploy/compose.yaml deploy/wait-for-devices.sh \
-  deploy/validate-running.sh deploy/ACCEPTANCE.md \
+  deploy/validate-running.sh deploy/ACCEPTANCE.md deploy/README.md \
   deploy/gate.env.example /opt/nextwaves-gate/deploy/
 sudo cp deploy/nextwaves-gate.service \
   deploy/nextwaves-gate-hotplug.service /etc/systemd/system/
 sudo cp deploy/99-nextwaves-rfid.rules /etc/udev/rules.d/
 sudo cp /opt/nextwaves-gate/deploy/gate.env.example \
   /opt/nextwaves-gate/deploy/gate.env
+sudo chown root:root /opt/nextwaves-gate/deploy/gate.env
+sudo chmod 0640 /opt/nextwaves-gate/deploy/gate.env
 ```
+
+`gate.env` is sourced by the preflight script as shell, so it is a trust
+boundary: keep it root-owned and not world-readable.
 
 Find the stable interfaces and dialout GID:
 
@@ -82,14 +67,25 @@ the default `nextwaves-${GATE_ID}` prevents collisions between cloned gates.
 `REST_HOST_PORT` and `GRPC_HOST_PORT` control only the ports published on the
 host. REST and gRPC remain fixed at `8443` and `50051` inside the container, so
 custom host ports do not change the health check or service listeners.
-`REST_BIND_IP` and `GRPC_BIND_IP` default to `127.0.0.1`. For remote clients,
-set both to the gate host's dedicated VLAN/VPN address, configure the host
-firewall to allow only approved customer source networks, and use that address
-or its TLS DNS name for validation. Never set either value to `0.0.0.0` or `::`.
-`DATABASE_BACKUP_RETENTION` keeps 1-100 backups of each safety-backup class;
-the production default is 10. Docker's `json-file` log is rotated at 10 MiB and
-five files by default; `LOG_MAX_SIZE` and `LOG_MAX_FILE` may lower those bounds
-to match the customer's retention policy.
+If you change the host ports, pass the same values to
+`scripts/verify_compose_contract.py --rest-host-port/--grpc-host-port`.
+
+`REST_BIND_IP` and `GRPC_BIND_IP` default to `127.0.0.1`. For remote clients:
+
+1. set both to the gate host's dedicated VLAN or VPN address;
+2. configure the host firewall to allow only approved customer source networks;
+3. use that address, or its TLS DNS name, as `GATE_API_URL` when validating;
+4. never use `0.0.0.0` or `::`; CI and `validate-running.sh` reject them.
+
+Other tunables in `gate.env`: `RFID_READER_MODULE` (reader protocol family,
+default `ZK`), `COMMAND_TIMEOUT_S` (hardware command and mutation-lock
+timeout, default 10), `MAX_BODY_BYTES` (REST body and gRPC message cap,
+default 1 MiB), `DATABASE_BACKUP_RETENTION` (1-100 backups of each
+safety-backup class, default 10), `GATE_MEM_LIMIT` and `GATE_CPUS` (container
+cgroup ceilings, default `1g` and `2.0`; raise `GATE_MEM_LIMIT` if the
+container is OOM-killed while loading the model). Docker's `json-file` log is
+rotated at 10 MiB and five files by default; `LOG_MAX_SIZE` and `LOG_MAX_FILE`
+may lower those bounds to match the customer's retention policy.
 
 ## 3. Provision secrets
 
@@ -123,12 +119,17 @@ production key. Windows DPAPI calibration cannot be reused on Linux.
 cd /opt/nextwaves-gate/deploy
 sudo systemctl daemon-reload
 sudo udevadm control --reload-rules
-# Unplug and reconnect the NR155 once so the new group/mode rule is applied.
+# Now unplug and reconnect the NR155 once so the new group/mode rule is
+# applied to both tty nodes. Continue only after it re-enumerates.
 sudo sh -c 'set -a; . ./gate.env; set +a; sh ./wait-for-devices.sh'
-sudo docker compose --env-file gate.env config
+sudo docker compose --env-file gate.env -f compose.yaml config --quiet
 sudo systemctl enable --now nextwaves-gate.service
 sudo REQUIRE_READY=0 sh ./validate-running.sh
 ```
+
+`REQUIRE_READY=0` must precede `sh` on the command line so `sudo` passes it
+through; the gate is not calibrated yet, so readiness is not required at this
+stage.
 
 Check liveness/readiness and logs:
 
@@ -170,10 +171,11 @@ then reconnect. MQTT/SQLite, not the gRPC stream, is the durable event source.
 
 Commissioning uses the authenticated endpoints under
 `/api/v1/calibration`. Every calibration mutation requires the same operator
-and idempotency headers as commands. Follow `ACCEPTANCE.md` and the bundled
-`contracts/openapi.json` for background, labelled pass, evaluate and abort
-payloads. After evaluation passes, run `validate-running.sh` again without
-`REQUIRE_READY=0`.
+and idempotency headers as commands. Worked curl examples for background,
+labelled pass, evaluate and abort are in the release bundle's `USAGE.md`
+(section "Calibration, commissioning"); the schema is `../contracts/openapi.json`.
+After evaluation passes, run `sudo sh ./validate-running.sh` with no
+`REQUIRE_READY` override (the default `1` requires `/readyz` to return 200).
 
 ## 6. Upgrade and rollback
 
@@ -211,3 +213,24 @@ sudo systemctl start nextwaves-gate.service
 Never replace the live `.db` file with `cp`; that can omit WAL data and bypass
 the service lock. The restore command intentionally does not map either USB
 interface, so recovery remains possible while failed hardware is disconnected.
+
+## Appendix: runtime structure
+
+The container entrypoint remains `python -m gate_service.main`. The headless
+package is split by responsibility so desktop adapters and transport code do
+not leak into the hardware/domain core:
+
+```text
+gate_service.main                 thin process entrypoint
+  -> gate_service.application     composition, REST/gRPC and shutdown order
+     -> gate_service.reader_engine    transaction, passage and gate state
+        -> gate_service.reader_protocol  VM64/ZK parsing and inventory commands
+        -> rfid_portal.*              SQLite, outbox and domain services
+     -> gate_service.api.*        REST/gRPC transport adapters
+     -> gate_service.event_bus    live fan-out and MQTT event bridge
+```
+
+`gate_service.contracts` is the stable boundary used by control/API adapters.
+Protocol names, HTTP routes, gRPC schema, MQTT topics, entrypoint, persistent
+paths and Compose device mappings are compatibility boundaries and must not be
+changed by internal refactors.

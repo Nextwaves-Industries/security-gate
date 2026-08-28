@@ -3,12 +3,16 @@
 # NOT for customer gates. Use deploy/compose.yaml (digest-pinned, contract
 # verified in CI) for production. This file:
 #   - runs a local Mosquitto MQTT 5 broker with TLS + password auth
-#   - builds (or uses) the gate-service image with the same runtime env
-#     allowlist and file-secret layout as production
-#   - makes the NR155 USB devices optional so the API/MQTT plane can be
-#     exercised on a laptop; without hardware /readyz stays 503 by design.
+#   - builds (or uses) the gate-service image with the production env
+#     allowlist plus LOG_LEVEL, and the same six file secrets; binds are
+#     loopback only, log rotation is fixed, no CPU limit
+#   - maps the NR155 USB devices from READER_DEVICE/SENSOR_DEVICE, defaulting
+#     to /dev/null so the container starts without hardware; /readyz then
+#     stays 503 by design and inventory commands are refused.
 #
 # Bootstrap once:   sh deploy/dev/bootstrap-dev-secrets.sh
+#                   (needs openssl and a running Docker daemon: it pulls
+#                   eclipse-mosquitto to hash the broker password)
 # Start:            docker compose -f deploy/compose.dev.yaml up --build -d
 # Follow logs:      docker compose -f deploy/compose.dev.yaml logs -f gate-service
 # Stop + wipe:      docker compose -f deploy/compose.dev.yaml down -v

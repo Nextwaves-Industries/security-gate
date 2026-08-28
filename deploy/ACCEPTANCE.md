@@ -26,7 +26,8 @@ Pass criteria:
 - Compose resolves an immutable `GATE_IMAGE` digest, one service only, loopback
   or dedicated VLAN/VPN port bindings, and bounded `json-file` log rotation.
 
-The host must provide Docker Engine, Docker Compose v2 and Python 3.8+. Keep
+The host must provide Docker Engine, Docker Compose v2 and Python 3.8+ (used
+by `validate-running.sh`). Keep
 `gate.env` in the template's unquoted `KEY=VALUE` format because the Linux
 preflight scripts source this trusted operator file using POSIX `sh`. The
 `dialout` ownership and mode are assigned when each tty interface is added.
@@ -60,8 +61,9 @@ sudo GATE_API_URL=https://gate-01.customer.example:8443 \
 
 ## 3. Commissioning calibration
 
-Use the authenticated `/api/v1/calibration` endpoints documented in
-`contracts/openapi.json`:
+Use the authenticated `/api/v1/calibration` endpoints. Worked curl examples are
+in the release bundle's `USAGE.md`, section "Calibration, commissioning"; the
+schema is `../contracts/openapi.json` in the bundle:
 
 1. create one calibration run with the commissioning operator ID;
 2. submit the empty-gate background capture;
@@ -71,11 +73,13 @@ Use the authenticated `/api/v1/calibration` endpoints documented in
    persisted run has the same ID, `status: PASSED`, the expected metrics and
    no failed acceptance checks;
 6. confirm `GET /readyz` becomes HTTP 200;
-7. run `sudo sh ./validate-running.sh` again with the default
-   `REQUIRE_READY=1`.
+7. run `sudo sh ./validate-running.sh` again with no `REQUIRE_READY`
+   override (the default is `1`). When you do need the override, the
+   assignment must precede `sh` so that `sudo` passes it through.
 
 Never copy the Windows DPAPI calibration database into a Linux gate. Preserve
-the 32-byte calibration root key in the customer's secret manager.
+the calibration root key (64 hexadecimal characters, 32 bytes) in the
+customer's secret manager.
 
 ## 4. Functional API and event checks
 
@@ -87,8 +91,11 @@ the 32-byte calibration root key in the customer's secret manager.
 - Start concurrently from two clients and confirm only one request is accepted.
 - Query transaction tags, passages and audit records after commit.
 - Observe the matching MQTT QoS 1 event and deduplicate it by `event_id`.
+  Note: until the gate is calibrated and READY it publishes no retained state
+  snapshot (known issue, `REVIEW.md` item 25), so perform the MQTT checks
+  after section 3.
 - Verify topics, retention and delivery behavior against the
-  [MQTT delivery contract](../contracts/MQTT.md).
+  MQTT delivery contract (`../contracts/MQTT.md` in the release bundle).
 - Connect a gRPC `WatchEvents` client, filter one event type, disconnect and
   resynchronize from REST before reconnecting.
 
@@ -105,7 +112,7 @@ Perform each test in a controlled maintenance window and record the outcome:
 | Reconnect NR155 | udev/systemd recreates the container; the same by-id nodes return; gate reaches READY |
 | Broker unavailable for 30 minutes | Local commit succeeds; outbox remains pending; every event is sent after reconnect/PUBACK |
 | Restart during an active transaction | SQLite recovery produces no duplicate transaction or `event_id` |
-| SIGTERM while idle/running/review | New commands are rejected and shutdown completes inside 30 seconds |
+| SIGTERM while idle/running/review, reader connected | New commands are rejected, shutdown completes inside 30 seconds, and the broker receives a clean `offline` state. Known issue (`REVIEW.md` item 24): with the reader unplugged the container is SIGKILLed at 30 s and the broker publishes the Last Will instead; do not run this test with the reader disconnected |
 | Reboot host | Gate identity, DB, calibration, config and volume data remain unchanged |
 | Wrong API token/certificate | REST and gRPC reject the client |
 | Second serial owner | A second process cannot open either mapped serial interface |

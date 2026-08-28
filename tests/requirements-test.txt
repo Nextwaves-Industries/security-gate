@@ -1,6 +1,7 @@
-# Test-only dependencies. Pins match requirements-headless.txt where the
-# package is also part of the runtime image; the image itself never installs
-# this file.
+# Test-only dependencies for CPython 3.11. Pins match requirements-headless.txt
+# where the package is also part of the runtime image; the image itself never
+# installs this file. tests/conftest.py stubs the compiled rfid_portal modules,
+# so the suite runs on any OS without the Linux .so files.
 fastapi==0.141.1
 starlette==1.6.0
 pydantic==2.13.4

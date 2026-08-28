@@ -4,13 +4,23 @@ Scope: the complete customer release repository (`runtime/`, `deploy/`,
 `scripts/`, `contracts/`, CI). Reviewed on 2026-08-28.
 
 **Important context.** This repository is a *release bundle*, not the source
-tree. 40 of 47 runtime modules are Cython-compiled `.so` binaries
+tree. `runtime/` holds 42 Cython-compiled `.so` modules
 (`gate_service.application`, `settings`, `reader_engine`, `event_bus`,
-`persistence`, all of `rfid_portal.*`, `utils.*`, `models.*`). Only the
-transport adapters (`gate_service/api/rest.py`, `api/grpc_server.py`), the
-entrypoints (`main.py`, `restore_database.py`) and the packaging scripts are
-readable. Findings marked **Upstream** can only be addressed in the protected
-source repository and are recorded here for that backlog.
+`persistence`, all of `rfid_portal.*`, `utils.*`, `models.*`) and 13 plaintext
+Python files. Findings marked **Upstream** can only be addressed in the
+protected source repository and are recorded here for that backlog.
+
+## What you can change in this bundle
+
+| Editable here | Compiled, needs the upstream source repository |
+|---|---|
+| `runtime/gate_service/main.py`, `restore_database.py` | `gate_service.application`, `settings`, `reader_engine`, `reader_protocol`, `device_supervisor`, `headless_control`, `event_bus`, `persistence`, `calibration_capture`, `observability`, `contracts`, `key_provider` |
+| `runtime/gate_service/api/rest.py`, `grpc_server.py`, `schemas.py` | all of `rfid_portal.*` (config, repository, MQTT, calibration, domain) |
+| `runtime/gate_service/proto/*.py` (generated from `contracts/gate_stream.proto`) | all of `utils.*` and `models.*` |
+| `deploy/`, `contracts/`, `scripts/`, `tests/`, `examples/`, `Dockerfile`, docs, CI | |
+
+After any edit run `python3.11 -B scripts/verify_product.py . --write` to
+regenerate `PRODUCT_SHA256SUMS`, otherwise CI fails on checksum drift.
 
 Overall assessment: the deployment posture is strong (digest-pinned image,
 read-only rootfs, `cap_drop: ALL`, file-backed secrets, loopback binds,
@@ -46,7 +56,7 @@ now documented · **Upstream** = requires protected source.
 | 17 | **Low** | `api/rest.py` `/readyz` | Unauthenticated readiness exposes the internal gate state string. Used by ops tooling. | **Documented** - intentional; loopback/VLAN only. |
 | 18 | **Low** | `api/rest.py` `/api/v1/status` vs gRPC `GetStatus` | REST maps `TimeoutError`/`RuntimeError` from `control.status` to a generic 500 while gRPC maps to `DEADLINE_EXCEEDED`/`UNAVAILABLE`. | **Upstream** - behaviour change; 503/504 are in the contract but the mapping should be decided with the domain owners. |
 | 19 | **Low** | `api/rest.py` lock-timeout path | A mutation-lock timeout stores a permanent 504 against the idempotency key; the client must use a new key. | **Documented** (USAGE.md troubleshooting). Design decision. |
-| 20 | **Low** | `requirements-headless.txt` | Fully pinned but no `--hash=`; apt layer (`ca-certificates`, `libgomp1`) unpinned. Verified 2026-08-28 that every pin resolves from PyPI (test venv install succeeded; image build in progress). | **Upstream** - add `pip-compile --generate-hashes`. |
+| 20 | **Low** | `requirements-headless.txt` | Fully pinned but no `--hash=`; apt layer (`ca-certificates`, `libgomp1`) unpinned. Verified 2026-08-28 that every pin resolves from PyPI and that the image builds for `linux/amd64`. | **Upstream** - add `pip-compile --generate-hashes`. |
 | 21 | **Med** | repo-wide | No behavioural tests existed; only packaging/checksum assertions. | **Fixed** - `tests/` (30 cases) run in CI on every push; covers headers/envelope, body cap, lock fail-fast, OpenAPI gating, threadpool offloading, audit payload decoding, minimal calibration response, route/response-code parity with `contracts/openapi.json`, gRPC status mapping and stream overflow. |
 | 22 | **Low** | `deploy/validate-running.sh`, `README.md` | `gate.env` is sourced as shell (`. ./gate.env`) - arbitrary code execution from an operator-owned config file. Documented as intentional. | **Documented** - treat `gate.env` as a trust boundary (root-owned, `0640`). |
 | 24 | **High** | `gate_service/application.so` shutdown path (reproduced with `deploy/compose.dev.yaml`, no NR155 attached, `init: true` **and** `init: false`) | On SIGTERM uvicorn logs `Shutting down … Finished server process` within ~0.1 s, but the process never exits; Docker SIGKILLs it at the 30 s `stop_grace_period` (exit 137). The MQTT session is closed only by the kill, so the broker publishes the Last Will instead of a clean offline state. `ACCEPTANCE.md` §recovery claims shutdown completes inside 30 s - that was evidently validated only with the reader connected. Most likely a non-daemon reconnect/supervisor or MQTT worker thread that does not observe the stop signal while the reader is disconnected. | **Upstream** - must be fixed before GA; until then a gate whose reader is unplugged will always take 30 s to stop and will not publish a clean offline state. Repro: `sh deploy/dev/bootstrap-dev-secrets.sh && docker compose -f deploy/compose.dev.yaml up -d && time docker compose -f deploy/compose.dev.yaml stop gate-service`. |
@@ -74,7 +84,7 @@ that run.
 - New `deploy/compose.dev.yaml`, `deploy/dev/` (Mosquitto config, secret
   bootstrap) - local qualification stack; not part of the customer contract.
 - New `tests/`, CI step in `.github/workflows/product-image.yml` - finding 21.
-- New `USAGE.md`; `README.md` links.
+- New `USAGE.md`; `README.md` rewritten in English (use cases, quick start, doc map); `examples/gate-console` reference UI.
 - `PRODUCT_SHA256SUMS` regenerated.
 
 ## 3. Operator-visible behaviour changes

@@ -1,32 +1,32 @@
 # Nextwaves RFID Portal Gate Service
 
 Headless, container-packaged control service for **one physical RFID portal
-gate** built on the Nextwaves NR155 reader/sensor unit. It runs the reader,
-detects tag passages with the bundled model, keeps an authoritative SQLite
-ledger of inventory transactions, and exposes three integration surfaces:
+gate** built on the Nextwaves NR155 reader/sensor unit. It drives the reader,
+decides which tags actually passed through the portal, keeps an authoritative
+SQLite ledger of inventory transactions, and exposes three integration
+surfaces:
 
-| Surface | Port | Purpose |
-|---|---|---|
-| **REST / HTTPS** | `8443` | commands (start / stop / commit / cancel inventory), transaction queries, calibration workflow, health |
-| **gRPC / TLS** | `50051` | status + live (non-durable) event stream |
-| **MQTT 5 / TLS** | customer broker | durable business events via a transactional outbox, retained gate state with Last Will |
+| Surface | Port | Direction | Durability | Use it for |
+|---|---|---|---|---|
+| REST / HTTPS | `8443` | client to gate | request/response | commands (start, stop, commit, cancel), queries, calibration, health |
+| gRPC / TLS | `50051` | client to gate | live stream, not durable | `GetStatus`, `WatchEvents` for dashboards |
+| MQTT 5 / TLS | customer broker | gate to broker | at-least-once via a transactional outbox | business events, retained gate state, Last Will |
 
-Version **1.0.0-rc1** - release candidate for canary and hardware acceptance on
+Version **1.0.0-rc1**: release candidate for canary and hardware acceptance on
 a real NR155 gate before `1.0.0`.
 
 > This repository is the **customer release bundle**. The business runtime and
 > model ship as CPython 3.11 / Linux x86_64 extensions (`.so`). It contains no
 > protected Python source, plaintext models, databases, calibration keys or
-> credentials. See [REVIEW.md](REVIEW.md) for what is and is not editable here.
-
----
+> credentials. [REVIEW.md](REVIEW.md#what-you-can-change-in-this-bundle) lists
+> exactly which files are editable here.
 
 ## Contents
 
-- [What it does](#what-it-does)
+- [How it works](#how-it-works)
 - [Typical use cases](#typical-use-cases)
-- [Quick start (laptop, no hardware)](#quick-start-laptop-no-hardware)
-- [Production deployment (customer gate)](#production-deployment-customer-gate)
+- [Quick start on a laptop](#quick-start-on-a-laptop)
+- [Production deployment](#production-deployment)
 - [Using the API](#using-the-api)
 - [Example operator console](#example-operator-console)
 - [Repository layout](#repository-layout)
@@ -34,224 +34,222 @@ a real NR155 gate before `1.0.0`.
 - [Security and operating rules](#security-and-operating-rules)
 - [Verification and release integrity](#verification-and-release-integrity)
 
----
+## How it works
 
-## What it does
+1. An operator system (WMS, handheld, or the [example console](#example-operator-console))
+   calls `POST /api/v1/commands/start-inventory` with a reference (ASN, order
+   number) and a direction, `INBOUND` or `OUTBOUND`.
+2. The gate powers the selected antennas. The sensor beam detects a pallet or
+   cart crossing the lane (a *passage*). The detection model separates tags
+   that moved through the portal from *stray reads* of tags that only sat
+   nearby.
+3. The operator commits or cancels the transaction. On commit the result and
+   an `inventory.*` event are written to SQLite in the same database
+   transaction; the event is then delivered to the customer MQTT broker at
+   least once (consumers deduplicate on `event_id`).
+4. Everything is queryable afterwards: the *net tags* (final set of tags that
+   passed), each passage, a *reconciliation* of expected versus seen EPCs, and
+   the full audit trail.
 
-```text
-             ┌───────────────────────────── gate host (Linux x86_64, Docker) ─────────────────────────────┐
- NR155 USB   │  gate-service container (read-only rootfs, uid 10001, cap_drop ALL)                        │
- 303a:4002 ──┼─▶ reader_engine ─▶ tag model ─▶ transactions / passages / audit (SQLite, WAL, outbox) ──┐   │
-  if00 reader│        │                                                                             │   │
-  if02 sensor│        ├─▶ REST 8443 ── commands, queries, calibration, /healthz /readyz            │   │
-             │        ├─▶ gRPC 50051 ── GetStatus, WatchEvents                                      │   │
-             │        └─▶ MQTT 5/TLS ── rfid/portal/v1/{GATE_ID}/state (retained) + events/… ◀──────┘   │
-             └───────────────────────────────────────────────────────────────────────────────────────────┘
-```
+Calibration is a first-class workflow (`/api/v1/calibration/*`): capture the
+empty-gate background, record labelled `IN` and `OUT` passes with known tags,
+then evaluate. Until a site is calibrated `GET /readyz` returns `503`.
 
-1. An operator (WMS, handheld, or the [example console](#example-operator-console))
-   calls `POST /api/v1/commands/start-inventory` with a reference (ASN, order)
-   and direction (`INBOUND` / `OUTBOUND`).
-2. The gate arms the reader antennas; the sensor beam detects a pallet/cart
-   passing through; the model decides which tags actually moved through the
-   portal versus stray reads.
-3. The operator commits (or cancels) the transaction. The result is written to
-   SQLite **and** to the MQTT outbox in the same transaction, then delivered
-   at-least-once to the customer broker (`inventory.*` events, dedupe on
-   `event_id`).
-4. Everything is queryable afterwards: net tags, individual passages,
-   reconciliation against expected EPCs, and a full audit trail.
-
-Calibration is a first-class workflow (`/api/v1/calibration/*`): background
-capture, labelled IN/OUT passes with known EPCs, evaluate. Until a site is
-calibrated the gate reports `readyz = 503 calibration_required`.
+Terms used throughout the docs are defined in the [glossary](USAGE.md#glossary).
 
 ## Typical use cases
 
 | Case | How the service is used |
 |---|---|
-| **Warehouse dock door - inbound receiving** | WMS starts an `INBOUND` inventory with the ASN's expected EPC list; forklift drives the pallet through; WMS commits and reads `/transactions/{id}` → `reconciliation` (expected vs. seen) to auto-close the receipt or flag shortages. |
-| **Outbound shipping verification** | `OUTBOUND` inventory per shipment; the net tag set is compared against the pick list before the truck door closes; mismatches cancel the transaction with a reason that lands in the audit log. |
-| **Production line / WIP gate** | Continuous small transactions per cart; consumers subscribe to `rfid/portal/v1/{gate}/events/#` on MQTT and never poll REST. |
-| **Retail back-of-store or library portal** | Same flow with `expected_epcs` empty; the gate simply reports what passed and in which direction (`passages`). |
-| **Multi-gate site** | One container per physical gate (`GATE_ID` unique); a central dashboard aggregates via MQTT and scrapes `/readyz` for fleet health. Never scale one container to several replicas. |
-| **Commissioning / field service** | Technician uses the calibration endpoints (or the example console) on site; `deploy/ACCEPTANCE.md` is the sign-off checklist. |
-| **Integration development without hardware** | `deploy/compose.dev.yaml` brings up the service + a local MQTT broker on a laptop; all read APIs, auth, health, MQTT connectivity and the console work; inventory stays disabled because no reader is attached. |
+| Warehouse dock door, inbound receiving | WMS starts an `INBOUND` inventory with the ASN's expected EPCs; the pallet is driven through; WMS commits and reads `reconciliation` to close the receipt or flag shortages. |
+| Outbound shipping verification | `OUTBOUND` inventory per shipment; net tags are compared with the pick list before the door closes; mismatches are cancelled with a reason that lands in the audit log. |
+| Production line or WIP gate | Many small transactions per cart; consumers subscribe to `rfid/portal/v1/{GATE_ID}/events/#` and never poll REST. |
+| Retail back-of-store or library portal | Same flow with an empty expected list; the gate reports what passed and in which direction. |
+| Multi-gate site | One container per physical gate, each with a unique `GATE_ID`; a central dashboard aggregates over MQTT and scrapes `/readyz`. Never run several replicas of one gate. |
+| Commissioning and field service | Technicians use the calibration endpoints or the console on site; `deploy/ACCEPTANCE.md` is the sign-off checklist. |
+| Integration development without hardware | `deploy/compose.dev.yaml` runs the service and a local broker on a laptop. Read APIs, auth, health, MQTT connectivity and the console all work; inventory stays disabled without a reader. |
 
-## Quick start (laptop, no hardware)
+## Quick start on a laptop
 
-Requirements: Docker Engine 24+ (or Docker Desktop / OrbStack), Compose v2, `openssl`.
+Requirements: an x86_64 host or Docker with x86 emulation (the runtime is
+`linux/amd64` only), Docker Engine 24+ or Docker Desktop/OrbStack, Compose v2,
+`openssl`.
 
 ```sh
 git clone <this repository> && cd RFID_Portal_release
 
-sh deploy/dev/bootstrap-dev-secrets.sh                 # dev CA, certs, API token, MQTT password
+sh deploy/dev/bootstrap-dev-secrets.sh     # dev CA, TLS certs, API token, calibration key, MQTT password
 docker compose -f deploy/compose.dev.yaml up --build -d
 docker compose -f deploy/compose.dev.yaml logs -f gate-service
 
 CA=deploy/dev/secrets/dev_ca.pem
 TOKEN=$(cat deploy/dev/secrets/api_token)
-curl --cacert $CA https://127.0.0.1:8443/healthz                                   # {"status":"ok"}
-curl --cacert $CA https://127.0.0.1:8443/readyz                                    # 503 degraded (no NR155) - expected
-curl --cacert $CA -H "Authorization: Bearer $TOKEN" https://127.0.0.1:8443/api/v1/status | jq
-open https://127.0.0.1:8443/docs                                                   # Swagger UI (dev mode only)
+curl --cacert "$CA" https://127.0.0.1:8443/healthz     # {"status":"ok"}
+curl --cacert "$CA" https://127.0.0.1:8443/readyz      # 503, error.code "degraded": no reader attached, expected
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" https://127.0.0.1:8443/api/v1/status
 ```
 
-Attach real hardware on a Linux host by exporting `READER_DEVICE`,
-`SENSOR_DEVICE` (the `/dev/serial/by-id/…-if00` / `-if02` links) and
-`DIALOUT_GID` before `up`. Tear down with `docker compose -f deploy/compose.dev.yaml down -v`.
+Swagger UI is at `https://127.0.0.1:8443/docs` (development mode only).
+To attach a real NR155 on a Linux host, export `READER_DEVICE`,
+`SENSOR_DEVICE` (the `/dev/serial/by-id/...-if00` and `-if02` links) and
+`DIALOUT_GID` before `up`. Stop and delete the volumes with
+`docker compose -f deploy/compose.dev.yaml down -v`.
 
 Full walkthrough: [USAGE.md](USAGE.md).
 
-## Production deployment (customer gate)
+## Production deployment
 
-Production uses `deploy/compose.yaml` - digest-pinned signed image, six
-file-backed secrets, USB passthrough, loopback/VLAN binds, systemd + udev
-hot-plug integration. The complete runbook is
-[deploy/README.md](deploy/README.md); the short version:
+The normative runbook is [deploy/README.md](deploy/README.md). Follow it in
+order; it covers obtaining the signed image by digest, host layout, secrets,
+udev/systemd installation, preflight, start, validation, calibration, upgrade
+and rollback. In short:
 
-```sh
-# 1. Verify and pull the signed image digest from RELEASE_MANIFEST.txt / VERIFY_RELEASE.md
-docker pull ghcr.io/OWNER/rfid-portal-gate-service@sha256:<digest>
+1. Pull the image by the digest listed in the release bundle's
+   `RELEASE_MANIFEST.txt` (generated by CI at tag time; not present in a
+   source checkout).
+2. Install `deploy/` files, fill `gate.env`, provision the six secret files.
+3. Reload udev/systemd, replug the NR155, run `wait-for-devices.sh`, then
+   `systemctl enable --now nextwaves-gate.service`.
+4. Run `validate-running.sh`, calibrate on site, run it again, complete
+   [deploy/ACCEPTANCE.md](deploy/ACCEPTANCE.md).
 
-# 2. Host layout
-sudo install -d -m 0750 /opt/nextwaves-gate/deploy
-sudo install -d -o 0 -g 10001 -m 0750 /etc/nextwaves-gate/secrets
-sudo install -d -o 10001 -g 10001 -m 0750 /var/lib/nextwaves-gate
-sudo cp deploy/compose.yaml deploy/wait-for-devices.sh deploy/validate-running.sh \
-        deploy/ACCEPTANCE.md deploy/gate.env.example /opt/nextwaves-gate/deploy/
-sudo install -m 0644 deploy/nextwaves-gate.service deploy/nextwaves-gate-hotplug.service /etc/systemd/system/
-sudo install -m 0644 deploy/99-nextwaves-rfid.rules /etc/udev/rules.d/
-
-# 3. Configure: copy gate.env.example → gate.env; set GATE_IMAGE (digest), GATE_ID,
-#    READER_DEVICE / SENSOR_DEVICE (by-id links), DIALOUT_GID, MQTT_*, *_SECRET_FILE paths.
-
-# 4. Secrets (root:10001 0440): api_token, calibration_root_key (64 hex), mqtt_password,
-#    tls_cert.pem, tls_key.pem, mqtt_ca.pem  → /etc/nextwaves-gate/secrets/
-
-# 5. Preflight, start, validate
-cd /opt/nextwaves-gate/deploy
-sudo systemctl daemon-reload && sudo udevadm control --reload-rules   # replug the NR155 once
-sudo sh -c 'set -a; . ./gate.env; set +a; sh ./wait-for-devices.sh'
-sudo docker compose --env-file gate.env config
-sudo systemctl enable --now nextwaves-gate.service
-sudo REQUIRE_READY=0 sh ./validate-running.sh
-```
-
-Then calibrate on site (Linux gates must be re-calibrated; Windows DPAPI state
-is not portable), complete [deploy/ACCEPTANCE.md](deploy/ACCEPTANCE.md), and
-run `validate-running.sh` again with `REQUIRE_READY=1`.
-
-Upgrade = new digest in `gate.env` + `systemctl restart`; the service takes an
-online SQLite backup before migrating. Rollback and restore procedure:
-[deploy/README.md §6](deploy/README.md).
+Do not copy the steps from memory; the runbook contains the exact ownership
+and permission requirements that the preflight script enforces.
 
 ## Using the API
 
-Authentication is a bearer token shared by REST and gRPC. Every **mutation**
-needs `X-Operator-ID` and a unique `Idempotency-Key` (replays return the cached
-result; a reused key with a different payload is `409 idempotency_conflict`).
+Authentication is a bearer token shared by REST and gRPC. Every mutation also
+needs `X-Operator-ID` and a unique `Idempotency-Key`: a replay returns the
+cached result, a reused key with a different payload returns
+`409 idempotency_conflict`.
 
 ```sh
-BASE=https://127.0.0.1:8443; CA=…/tls_cert.pem; AUTH="Authorization: Bearer $(cat …/api_token)"
+BASE=https://127.0.0.1:8443
+CA=deploy/dev/secrets/dev_ca.pem                   # production: /etc/nextwaves-gate/secrets/tls_cert.pem
+TOKEN=$(cat deploy/dev/secrets/api_token)          # production: sudo cat /etc/nextwaves-gate/secrets/api_token
+AUTH="Authorization: Bearer $TOKEN"
 
-# Start → commit an inbound receipt
-curl --cacert $CA -H "$AUTH" -H 'X-Operator-ID: op-01' -H "Idempotency-Key: $(uuidgen)" \
+# Start, then commit, an inbound receipt
+curl --cacert "$CA" -H "$AUTH" -H 'X-Operator-ID: op-01' -H "Idempotency-Key: $(uuidgen)" \
   -H 'Content-Type: application/json' \
   -d '{"reference":"ASN-100","operation":"INBOUND","expected_epcs":["E2000017221101441890A1B2"],
        "antennas":[true,true,false,false],"session":0,"target":"A"}' \
-  $BASE/api/v1/commands/start-inventory
-curl --cacert $CA -H "$AUTH" -H 'X-Operator-ID: op-01' -H "Idempotency-Key: $(uuidgen)" -X POST $BASE/api/v1/commands/commit-transaction
+  "$BASE/api/v1/commands/start-inventory"
+curl --cacert "$CA" -H "$AUTH" -H 'X-Operator-ID: op-01' -H "Idempotency-Key: $(uuidgen)" \
+  -X POST "$BASE/api/v1/commands/commit-transaction"
 
 # Query
-curl --cacert $CA -H "$AUTH" "$BASE/api/v1/transactions?status=COMMITTED&limit=20"
-curl --cacert $CA -H "$AUTH"  $BASE/api/v1/transactions/<id>          # record + reconciliation
-curl --cacert $CA -H "$AUTH"  $BASE/api/v1/transactions/<id>/tags     # net EPC set
-curl --cacert $CA -H "$AUTH"  $BASE/api/v1/transactions/<id>/audit
+TX=paste-a-transaction-id
+curl --cacert "$CA" -H "$AUTH" "$BASE/api/v1/transactions?status=COMMITTED&limit=20"
+curl --cacert "$CA" -H "$AUTH" "$BASE/api/v1/transactions/$TX"        # record plus reconciliation
+curl --cacert "$CA" -H "$AUTH" "$BASE/api/v1/transactions/$TX/tags"   # net tags
+curl --cacert "$CA" -H "$AUTH" "$BASE/api/v1/transactions/$TX/audit"
 
-# Live status over gRPC; durable events over MQTT
-grpcurl -cacert $CA -H "authorization: Bearer $TOKEN" -proto contracts/gate_stream.proto \
+# Live status over gRPC
+grpcurl -cacert "$CA" -H "authorization: Bearer $TOKEN" -proto contracts/gate_stream.proto \
   127.0.0.1:50051 nextwaves.gate.v1.GateStreamService/GetStatus
-mosquitto_sub -h broker -p 8883 --cafile ca.pem -u gate-01 -P … -t 'rfid/portal/v1/GATE-01/#' -v
+
+# Durable events over MQTT (dev broker)
+mosquitto_sub -h 127.0.0.1 -p 8883 --cafile "$CA" -u gate-dev \
+  -P "$(cat deploy/dev/secrets/mqtt_password)" -t 'rfid/portal/v1/GATE-DEV/#' -v
 ```
 
-Contracts: [REST OpenAPI](contracts/openapi.json) ·
-[gRPC proto](contracts/gate_stream.proto) ·
-[MQTT delivery contract](contracts/MQTT.md) ·
+Contracts: [REST OpenAPI](contracts/openapi.json),
+[gRPC proto](contracts/gate_stream.proto),
+[MQTT delivery contract](contracts/MQTT.md),
 [MQTT envelope schema](contracts/mqtt/event-envelope.schema.json).
-Health semantics, error codes, calibration flow and troubleshooting:
+Health semantics, error codes, the calibration flow and troubleshooting are in
 [USAGE.md](USAGE.md).
 
 ## Example operator console
 
 [`examples/gate-console`](examples/gate-console) is a Vite + React reference UI
-for one gate - a top-down live view of the portal (reader, sensor beam,
-antennas, direction), a plain status headline, start / stop /
-commit / cancel actions, transaction browser with reconciliation and audit
-timeline, the full calibration flow, and a Config page showing the gate's
-effective configuration.
+for one gate: a rendered view of the portal with reader, sensor and antenna
+state, Start / Stop / Commit / Cancel, a transaction browser with
+reconciliation and audit timeline, the calibration flow, and a Config page
+for the connection settings and the gate's reported configuration.
 
 ```sh
 cd examples/gate-console && npm install && cp .env.example .env && npm run dev   # http://localhost:5173
 ```
 
-Paste the API token under **Config**. The Vite dev server proxies to the gate
-(`VITE_GATE_URL`), because the service intentionally emits no CORS headers; in
-production serve `dist/` from the same origin as the API. Details:
-[examples/gate-console/README.md](examples/gate-console/README.md).
+Open Config and paste the access token; settings apply as you type. The dev
+server proxies to the gate (`VITE_GATE_URL`) because the service sends no CORS
+headers. Details: [examples/gate-console/README.md](examples/gate-console/README.md).
 
 ## Repository layout
 
 ```text
-runtime/            protected cp311 Linux runtime (.so) + plaintext transport adapters (api/rest.py, api/grpc_server.py)
-deploy/             compose.yaml (prod), compose.dev.yaml (dev), systemd, udev, preflight/validation, acceptance checklist
-deploy/dev/         Mosquitto config + bootstrap-dev-secrets.sh for the dev stack
-contracts/          REST OpenAPI, gRPC proto, MQTT contract + JSON Schemas
+runtime/            compiled cp311 Linux runtime (.so) plus plaintext entrypoints and transport
+                    adapters: gate_service/main.py, restore_database.py, api/rest.py,
+                    api/grpc_server.py, api/schemas.py, proto/*.py
+deploy/             compose.yaml (production), compose.dev.yaml (development), systemd, udev,
+                    preflight and validation scripts, acceptance checklist, runbook
+deploy/dev/         Mosquitto config and bootstrap-dev-secrets.sh for the dev stack
+contracts/          REST OpenAPI, gRPC proto, MQTT contract and JSON Schemas
 examples/           gate-console reference UI (Vite + React)
 tests/              pytest suite for the transport adapters (compiled modules stubbed); runs in CI
-scripts/            product checksum manifest, leakage scanner, Compose contract checker, image smoke test
+scripts/            verify_product.py (checksum manifest), scan_headless_release.py (leakage scan),
+                    verify_compose_contract.py, smoke_headless_image.py, stage_headless_runtime.py
 release/            protected-runtime module manifest
-Dockerfile          runtime-only image (no protected source is compiled here)
-USAGE.md            end-to-end usage guide · REVIEW.md  production-readiness review
+Dockerfile          runtime-only image; no protected source is compiled here
+USAGE.md            usage guide      REVIEW.md   production-readiness review and known issues
 ```
 
 ## Documentation map
 
 | Need | Read |
 |---|---|
-| Run it locally, call the API, troubleshoot | [USAGE.md](USAGE.md) |
-| Deploy to a customer gate, secrets, backup/restore, upgrade | [deploy/README.md](deploy/README.md) |
+| Run it locally, call the API, troubleshoot, glossary | [USAGE.md](USAGE.md) |
+| Deploy to a customer gate, secrets, backup, restore, upgrade | [deploy/README.md](deploy/README.md) |
 | Hardware commissioning sign-off | [deploy/ACCEPTANCE.md](deploy/ACCEPTANCE.md) |
-| What was reviewed, what was fixed, known runtime issues | [REVIEW.md](REVIEW.md) |
+| What was reviewed, what was fixed, known runtime issues, what is editable | [REVIEW.md](REVIEW.md) |
 | Build an integration | [contracts/](contracts/) |
 | Build an operator UI | [examples/gate-console/README.md](examples/gate-console/README.md) |
 
 ## Security and operating rules
 
-- One container ⇔ one physical gate. Never run replicas or the desktop runtime
-  against the same serial interfaces.
-- REST and gRPC bind to loopback by default; for remote clients use the host's
-  dedicated VLAN/VPN address. Wildcard binds are rejected by CI and by
+- One container is one physical gate. Never run replicas or the desktop
+  runtime against the same serial interfaces.
+- REST and gRPC bind to loopback by default. For remote clients use the host's
+  dedicated VLAN or VPN address; wildcard binds are rejected by CI and by
   `validate-running.sh`. Do not expose the service to the Internet.
-- TLS ≥ 1.2 everywhere; secrets are files (`root:10001 0440`), never environment
-  variables. `GATE_DEVELOPMENT` and `GATE_ALLOW_INSECURE` must stay `false` in
-  production (CI-enforced).
+- TLS 1.2 or newer everywhere. Secrets are files owned `root:10001` mode
+  `0440`, never environment variables. `GATE_DEVELOPMENT` and
+  `GATE_ALLOW_INSECURE` must stay `false` in production (CI-enforced).
+- The container runs with a read-only root filesystem, no capabilities, an
+  init process, and memory/CPU/PID limits (`GATE_MEM_LIMIT`, `GATE_CPUS`).
 - The calibration root key is customer-owned; losing it forces re-calibration.
-- Never commit `gate.env`, secrets, databases or customer data to this repository.
+- Never commit `gate.env`, secrets, databases or customer data to this
+  repository.
 
 ## Verification and release integrity
 
-Every file is locked by `PRODUCT_SHA256SUMS`; CI fails on drift. After an
-intended edit regenerate it with Python 3.11:
+Every file is locked by `PRODUCT_SHA256SUMS` and CI fails on drift. The same
+checks CI runs, reproduced locally (CPython 3.11 required; `-B` prevents cache
+directories, which the manifest check rejects):
 
 ```sh
-python3.11 -B scripts/verify_product.py . --write
-python3.11 -B scripts/scan_headless_release.py --root runtime --manifest release/protected_modules_headless.json
-docker compose --env-file deploy/gate.env.example -f deploy/compose.yaml config --format json > /tmp/c.json
-python3.11 -B scripts/verify_compose_contract.py /tmp/c.json --rest-host-port 8443 --grpc-host-port 50051
-pip install -r tests/requirements-test.txt && python -B -m pytest -p no:cacheprovider -q tests
+python3.11 -m venv ~/.venvs/gate && . ~/.venvs/gate/bin/activate
+pip install -r tests/requirements-test.txt
+export PYTHONDONTWRITEBYTECODE=1
+
+python -B scripts/verify_product.py . --write        # regenerate the manifest after intended edits
+python -B scripts/verify_product.py .
+python -B scripts/scan_headless_release.py --root runtime --manifest release/protected_modules_headless.json
+resolved=$(mktemp)
+docker compose --env-file deploy/gate.env.example -f deploy/compose.yaml config --format json > "$resolved"
+python -B scripts/verify_compose_contract.py "$resolved" --rest-host-port 8443 --grpc-host-port 50051
+sh -n deploy/wait-for-devices.sh deploy/validate-running.sh deploy/dev/bootstrap-dev-secrets.sh
+python -B -m pytest -p no:cacheprovider -q tests
+(cd examples/gate-console && npm ci && npm run build)
+git ls-files | grep -vE '\.so$|PRODUCT_SHA256SUMS' | xargs grep -nP '[\x{2013}\x{2014}]|[ \t]+$|\r$' && echo LINT FAILED
 ```
 
+`--rest-host-port` and `--grpc-host-port` must equal `REST_HOST_PORT` and
+`GRPC_HOST_PORT` in the env file you pass.
+
 Release images are built by `.github/workflows/product-image.yml`, signed with
-Cosign, shipped with SBOM + provenance, and must be deployed by **digest**,
-never by tag. Verify per `VERIFY_RELEASE.md` in the release bundle.
+Cosign, published with SBOM and provenance, and must be deployed by **digest**,
+never by tag. The tag-time job also produces the customer bundle with
+`RELEASE_MANIFEST.txt` and `VERIFY_RELEASE.md`.

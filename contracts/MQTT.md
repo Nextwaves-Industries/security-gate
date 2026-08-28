@@ -34,14 +34,22 @@ Consumers may subscribe to the concrete state topic and to
 
 The state message is QoS 1 and retained, so a new subscriber receives the most
 recent snapshot. After connecting, the service publishes an `online` state and
-refreshes it periodically. Live state transitions are also emitted as
-non-retained `gate.state.changed` events, so the retained snapshot may lag a
-transition until the next heartbeat.
+refreshes it every 30 seconds (`state_heartbeat_s`). Live state transitions are
+also emitted as non-retained `gate.state.changed` events, so the retained
+snapshot may lag a transition by up to one heartbeat.
+
+Known limitation in 1.0.0-rc1: while the gate is `DEGRADED` (reader
+disconnected) the client connects and registers its Last Will but publishes no
+state snapshot and no heartbeat. Consumers cannot distinguish "gate up, reader
+unplugged" from "gate never started" until the gate reaches READY. Tracked as
+`REVIEW.md` item 25.
 
 The MQTT Last Will is published to the same state topic with QoS 1 and retained
 delivery. Its envelope has `event_type: gate.state.changed` and
-`data.connection: offline`. A clean shutdown explicitly publishes the same
-offline state before disconnecting. Therefore the retained state represents
+`data.connection: offline`. A clean shutdown with the reader connected
+explicitly publishes the same offline state before disconnecting; with the
+reader unplugged the 1.0.0-rc1 process does not exit on SIGTERM and the broker
+publishes the Last Will instead (`REVIEW.md` item 24). Therefore the retained state represents
 the latest known connection state; it is not an append-only event history.
 
 ## Durable business delivery
@@ -86,7 +94,8 @@ REST/HTTPS for every command and calibration mutation.
 
 For each commissioned gate, verify:
 
-1. a new subscriber receives the retained state snapshot;
+1. a new subscriber receives the retained state snapshot (test after the gate
+   is calibrated and READY, see the known limitation above);
 2. an unclean disconnect causes the broker to retain the offline Last Will;
 3. event messages are QoS 1 and not retained;
 4. an MQTT outage leaves business events in the SQLite outbox;
