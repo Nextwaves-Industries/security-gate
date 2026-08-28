@@ -13,6 +13,14 @@ MANIFEST_NAME = "PRODUCT_SHA256SUMS"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
 FORBIDDEN_CACHE_PARTS = {".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__"}
+# Git-ignored, generated-only trees that are never part of the product.
+# deploy/dev/secrets holds throw-away local certificates/tokens created by
+# deploy/dev/bootstrap-dev-secrets.sh.
+IGNORED_PRODUCT_PREFIXES = (
+    ("deploy", "dev", "secrets"),
+    ("examples", "gate-console", "node_modules"),
+    ("examples", "gate-console", "dist"),
+)
 FORBIDDEN_PRODUCT_SUFFIXES = {
     ".db",
     ".db-shm",
@@ -39,11 +47,19 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_ignored(relative_parts: tuple[str, ...]) -> bool:
+    if ".git" in relative_parts:
+        return True
+    return any(
+        relative_parts[: len(prefix)] == prefix for prefix in IGNORED_PRODUCT_PREFIXES
+    )
+
+
 def _reject_symlinks(root: Path) -> None:
     symlinks = sorted(
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
-        if ".git" not in path.relative_to(root).parts and path.is_symlink()
+        if not _is_ignored(path.relative_to(root).parts) and path.is_symlink()
     )
     if symlinks:
         raise ValueError(f"symlinks are forbidden in the product: {symlinks[:10]}")
@@ -54,7 +70,7 @@ def _product_files(root: Path) -> set[str]:
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
         if path.is_file()
-        and ".git" not in path.relative_to(root).parts
+        and not _is_ignored(path.relative_to(root).parts)
         and path.name != MANIFEST_NAME
     }
 

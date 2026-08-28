@@ -31,10 +31,11 @@ services:
       GATE_DEVELOPMENT: "false"
       GATE_ALLOW_INSECURE: "false"
     devices:
-      - "${READER_DEVICE}:/dev/rfid-reader:rwm"
-      - "${SENSOR_DEVICE}:/dev/rfid-sensor:rwm"
+      # rw only: CDC serial never needs mknod inside the container.
+      - "${READER_DEVICE:?Set READER_DEVICE to the NR155 if00 /dev/serial/by-id link}:/dev/rfid-reader:rw"
+      - "${SENSOR_DEVICE:?Set SENSOR_DEVICE to the NR155 if02 /dev/serial/by-id link}:/dev/rfid-sensor:rw"
     group_add:
-      - "${DIALOUT_GID}"
+      - "${DIALOUT_GID:?Set DIALOUT_GID to the numeric host dialout group (getent group dialout)}"
     ports:
       - "${REST_BIND_IP:-127.0.0.1}:${REST_HOST_PORT:-8443}:8443"
       - "${GRPC_BIND_IP:-127.0.0.1}:${GRPC_HOST_PORT:-50051}:50051"
@@ -54,6 +55,16 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # PID 1 init forwards SIGTERM and reaps zombies from the model threadpool.
+    init: true
+    # Resource ceilings: lightgbm/pandas/scikit-learn must never OOM the host.
+    pids_limit: 256
+    mem_limit: "${GATE_MEM_LIMIT:-1g}"
+    cpus: "${GATE_CPUS:-2.0}"
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
     stop_grace_period: 30s
     logging:
       driver: json-file
@@ -65,7 +76,7 @@ services:
         - CMD
         - python
         - -c
-        - "import ssl,urllib.request; c=ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=c,timeout=2).read()"
+        - "import ssl,urllib.request; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=c,timeout=2).read()"
       interval: 30s
       timeout: 3s
       retries: 3

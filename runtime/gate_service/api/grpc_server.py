@@ -7,6 +7,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 import hmac
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,25 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from gate_service.proto import gate_stream_pb2, gate_stream_pb2_grpc
 
 
+log = logging.getLogger("gate_service.grpc")
+
+# GateServiceSettings does not expose transport tunables; keep them as named
+# constants rather than literals scattered through the server code.
+_WATCH_EVENTS_QUEUE_DEPTH = 1000  # events buffered per slow client before abort
+_KEEPALIVE_TIME_MS = 30_000
+_KEEPALIVE_TIMEOUT_MS = 10_000
+
+
 def _timestamp(value: str | None = None) -> Timestamp:
     result = Timestamp()
+    parsed: datetime | None = None
     if value:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    else:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            # One malformed occurred_at must not terminate a live stream.
+            log.warning("Malformed event timestamp %r; using current time", value)
+    if parsed is None:
         parsed = datetime.now(timezone.utc)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -54,6 +69,7 @@ class GateStreamService(gate_stream_pb2_grpc.GateStreamServiceServicer):
             or scheme.lower() != "bearer"
             or not hmac.compare_digest(supplied.strip(), self.token)
         ):
+            # context.abort() raises grpc.aio.AbortError; it never returns.
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "Valid bearer token required"
             )
@@ -62,21 +78,29 @@ class GateStreamService(gate_stream_pb2_grpc.GateStreamServiceServicer):
         await self._authenticate(context)
         try:
             status = await asyncio.to_thread(self.control.status, self.timeout_s)
+            return gate_stream_pb2.GateStatus(
+                gate_id=str(status.get("gate_id", "")),
+                state=str(status.get("state", "")),
+                ready=bool(status.get("ready", False)),
+                observed_at=_timestamp(),
+                details=_struct(status),
+            )
         except TimeoutError:
             await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "Status timed out")
         except RuntimeError as exc:
             await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
-        return gate_stream_pb2.GateStatus(
-            gate_id=str(status.get("gate_id", "")),
-            state=str(status.get("state", "")),
-            ready=bool(status.get("ready", False)),
-            observed_at=_timestamp(),
-            details=_struct(status),
-        )
+        except grpc.aio.AbortError:
+            raise
+        except Exception:
+            # Never leak internal exception text to the client.
+            log.exception("GetStatus failed")
+            await context.abort(grpc.StatusCode.INTERNAL, "Unexpected server error")
 
     async def WatchEvents(self, request, context):
         await self._authenticate(context)
-        subscription = self.event_bus.subscribe(request.event_type, max_events=1000)
+        subscription = self.event_bus.subscribe(
+            request.event_type, max_events=_WATCH_EVENTS_QUEUE_DEPTH
+        )
         try:
             while True:
                 envelope = await subscription.queue.get()
@@ -105,7 +129,10 @@ async def start_grpc_server(control, event_bus, settings) -> grpc.aio.Server:
         options=(
             ("grpc.max_receive_message_length", settings.max_body_bytes),
             ("grpc.max_send_message_length", settings.max_body_bytes),
-            ("grpc.keepalive_time_ms", 30_000),
+            ("grpc.keepalive_time_ms", _KEEPALIVE_TIME_MS),
+            ("grpc.keepalive_timeout_ms", _KEEPALIVE_TIMEOUT_MS),
+            # WatchEvents streams can idle for long periods; keep probing.
+            ("grpc.keepalive_permit_without_calls", 1),
         )
     )
     gate_stream_pb2_grpc.add_GateStreamServiceServicer_to_server(

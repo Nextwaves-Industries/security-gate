@@ -1,0 +1,10 @@
+# Test-only dependencies. Pins match requirements-headless.txt where the
+# package is also part of the runtime image; the image itself never installs
+# this file.
+fastapi==0.141.1
+starlette==1.6.0
+pydantic==2.13.4
+grpcio==1.83.0
+protobuf==6.33.6
+httpx==0.28.1
+pytest==8.4.1

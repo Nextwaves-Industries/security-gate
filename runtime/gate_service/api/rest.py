@@ -8,7 +8,6 @@ import hmac
 import json
 import logging
 import re
-import threading
 import uuid
 from typing import Any, Callable
 
@@ -45,6 +44,11 @@ from .schemas import (
 
 
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+_BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
 _bearer = HTTPBearer(auto_error=False)
 log = logging.getLogger("gate_service.rest")
 
@@ -75,20 +79,53 @@ def _dump(model) -> dict[str, Any]:
     return model.dict()
 
 
+def _request_id(request: Request) -> str:
+    """Return the request correlation id without ever raising.
+
+    Exception handlers must be able to build an error envelope even when the
+    request never reached the ``request_context`` middleware.
+    """
+
+    request_id = getattr(request.state, "request_id", None)
+    if not request_id:
+        request_id = f"req_{uuid.uuid4().hex}"
+        request.state.request_id = request_id
+    return request_id
+
+
+def _finalize_headers(response, request_id: str):
+    response.headers["X-Request-ID"] = request_id
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers[name] = value
+    return response
+
+
+async def _db(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a blocking repository/engine call off the event loop."""
+
+    return await run_in_threadpool(fn, *args, **kwargs)
+
+
 def create_app(runtime, control, engine, settings) -> FastAPI:
     app = FastAPI(
         title="Nextwaves Gate Service API",
         version="1.0.0",
         docs_url="/docs" if settings.development else None,
         redoc_url=None,
-        openapi_url="/openapi.json",
+        # The live schema is only public in development; production serves it
+        # to authenticated clients through the explicit route registered below.
+        openapi_url="/openapi.json" if settings.development else None,
         responses=_COMMON_ERROR_RESPONSES,
     )
     expected_token = settings.api_token()
     executor = RemoteCommandExecutor(
         runtime, control, timeout_s=settings.command_timeout_s
     )
-    mutation_lock = getattr(runtime, "remote_command_lock", threading.Lock())
+    # The lock must be the same object the reader engine serialises hardware
+    # mutations with. A private fallback lock would silently defeat that, so a
+    # missing attribute is a startup error rather than a degraded mode.
+    mutation_lock = runtime.remote_command_lock
+    max_body_bytes = int(settings.max_body_bytes)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable):
@@ -96,59 +133,50 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         request.state.request_id = (
             supplied if _SAFE_REQUEST_ID.fullmatch(supplied) else f"req_{uuid.uuid4().hex}"
         )
+        request_id = request.state.request_id
         length = request.headers.get("content-length")
         if length:
             try:
                 parsed_length = int(length)
                 if parsed_length < 0:
                     raise ValueError
-                if parsed_length > settings.max_body_bytes:
-                    return _error(
-                        413,
-                        "request_too_large",
-                        "Request body exceeds 1 MiB",
-                        request.state.request_id,
-                    )
             except ValueError:
                 return _error(
                     400,
                     "invalid_content_length",
                     "Content-Length is invalid",
-                    request.state.request_id,
+                    request_id,
                 )
-        elif request.method in {"POST", "PUT", "PATCH"}:
-            body = await request.body()
-            if len(body) > settings.max_body_bytes:
+            if parsed_length > max_body_bytes:
                 return _error(
-                    413,
-                    "request_too_large",
-                    "Request body exceeds 1 MiB",
-                    request.state.request_id,
+                    413, "request_too_large", "Request body exceeds 1 MiB", request_id
+                )
+        elif request.method not in _BODYLESS_METHODS:
+            # Chunked transfer: Starlette caches the body so downstream
+            # handlers replay it. This bounds the accepted size, not the peak
+            # memory of an in-flight chunked upload.
+            body = await request.body()
+            if len(body) > max_body_bytes:
+                return _error(
+                    413, "request_too_large", "Request body exceeds 1 MiB", request_id
                 )
         response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        return response
+        return _finalize_headers(response, request_id)
 
     @app.exception_handler(ApiFailure)
     async def api_failure(request: Request, exc: ApiFailure):
-        return _error(
-            exc.status, exc.code, exc.message, request.state.request_id
-        )
+        return _error(exc.status, exc.code, exc.message, _request_id(request))
 
     @app.exception_handler(RequestValidationError)
     async def validation_failure(request: Request, exc: RequestValidationError):
         details = exc.errors()
         message = details[0].get("msg", "Request is invalid") if details else "Request is invalid"
+        request_id = _request_id(request)
         if any(detail.get("type") == "json_invalid" for detail in details):
             return _error(
-                400,
-                "invalid_json",
-                "Request body is not valid JSON",
-                request.state.request_id,
+                400, "invalid_json", "Request body is not valid JSON", request_id
             )
-        return _error(422, "invalid_payload", str(message), request.state.request_id)
+        return _error(422, "invalid_payload", str(message), request_id)
 
     @app.exception_handler(HTTPException)
     async def http_failure(request: Request, exc: HTTPException):
@@ -156,23 +184,21 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
             exc.status_code,
             "not_found" if exc.status_code == 404 else "http_error",
             str(exc.detail),
-            request.state.request_id,
+            _request_id(request),
         )
 
     @app.exception_handler(Exception)
     async def unknown_failure(request: Request, exc: Exception):
+        # Runs inside Starlette's ServerErrorMiddleware, outside the
+        # request_context middleware, so _error() must add headers itself.
+        request_id = _request_id(request)
         log.exception(
             "Unhandled REST error request_id=%s path=%s",
-            request.state.request_id,
+            request_id,
             request.url.path,
             exc_info=exc,
         )
-        return _error(
-            500,
-            "internal_error",
-            "Unexpected server error",
-            request.state.request_id,
-        )
+        return _error(500, "internal_error", "Unexpected server error", request_id)
 
     async def authenticate(
         credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
@@ -183,6 +209,16 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
             supplied, expected_token
         ):
             raise ApiFailure(401, "unauthorized", "Valid bearer token required")
+
+    if not settings.development:
+
+        @app.get(
+            "/openapi.json",
+            include_in_schema=False,
+            dependencies=[Depends(authenticate)],
+        )
+        async def openapi_schema() -> dict[str, Any]:
+            return app.openapi()
 
     def command_headers(
         operator_id: str = Header(..., alias="X-Operator-ID"),
@@ -205,13 +241,13 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
 
     @app.get("/readyz", include_in_schema=False)
     async def readyz(request: Request):
-        status = engine.status()
+        status = await _db(engine.status)
         if not status["ready"]:
             return _error(
                 503,
                 str(status["state"]).lower(),
                 "Gate is not ready",
-                request.state.request_id,
+                _request_id(request),
             )
         return {"status": "ready", "state": status["state"]}
 
@@ -278,17 +314,17 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                 normalized = TransactionStatus(normalized).value
             except ValueError as exc:
                 raise ApiFailure(422, "invalid_status", "Unknown transaction status") from exc
-        return {
-            "items": runtime.repository.list_transactions(
-                status=normalized or None, limit=limit, offset=offset
-            ),
-            "limit": limit,
-            "offset": offset,
-        }
+        items = await _db(
+            runtime.repository.list_transactions,
+            status=normalized or None,
+            limit=limit,
+            offset=offset,
+        )
+        return {"items": items, "limit": limit, "offset": offset}
 
-    def require_transaction(transaction_id: str) -> dict[str, Any]:
+    async def require_transaction(transaction_id: str) -> dict[str, Any]:
         try:
-            return runtime.repository.get_transaction_record(transaction_id)
+            return await _db(runtime.repository.get_transaction_record, transaction_id)
         except KeyError as exc:
             raise ApiFailure(404, "transaction_not_found", "Transaction not found") from exc
 
@@ -298,12 +334,11 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         response_model=TransactionResponse,
     )
     async def transaction(transaction_id: str):
-        return {
-            "transaction": require_transaction(transaction_id),
-            "reconciliation": runtime.repository.transaction_reconciliation(
-                transaction_id
-            ),
-        }
+        record = await require_transaction(transaction_id)
+        reconciliation = await _db(
+            runtime.repository.transaction_reconciliation, transaction_id
+        )
+        return {"transaction": record, "reconciliation": reconciliation}
 
     @app.get(
         "/api/v1/transactions/{transaction_id}/tags",
@@ -311,8 +346,9 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         response_model=ItemsResponse,
     )
     async def transaction_tags(transaction_id: str):
-        require_transaction(transaction_id)
-        return {"items": runtime.repository.net_transaction_tags(transaction_id)}
+        await require_transaction(transaction_id)
+        items = await _db(runtime.repository.net_transaction_tags, transaction_id)
+        return {"items": items}
 
     @app.get(
         "/api/v1/transactions/{transaction_id}/passages",
@@ -320,8 +356,9 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         response_model=ItemsResponse,
     )
     async def transaction_passages(transaction_id: str):
-        require_transaction(transaction_id)
-        return {"items": runtime.repository.list_passages(transaction_id)}
+        await require_transaction(transaction_id)
+        items = await _db(runtime.repository.list_passages, transaction_id)
+        return {"items": items}
 
     @app.get(
         "/api/v1/transactions/{transaction_id}/audit",
@@ -333,9 +370,12 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         limit: int = Query(default=200, ge=1, le=1000),
         offset: int = Query(default=0, ge=0, le=10_000_000),
     ):
-        require_transaction(transaction_id)
-        items = runtime.repository.list_transaction_audit(
-            transaction_id, limit=limit, offset=offset
+        await require_transaction(transaction_id)
+        items = await _db(
+            runtime.repository.list_transaction_audit,
+            transaction_id,
+            limit=limit,
+            offset=offset,
         )
         for item in items:
             raw = item.pop("payload_json", "{}")
@@ -352,13 +392,14 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         headers: tuple[str, str],
     ) -> dict[str, Any]:
         actor, key = headers
+        request_id = _request_id(request)
         try:
             return await run_in_threadpool(
                 executor.execute,
                 command,
                 payload,
                 actor,
-                request.state.request_id,
+                request_id,
                 key,
                 require_idempotency=True,
             )
@@ -374,6 +415,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
         before_lock: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         actor, key = headers
+        request_id = _request_id(request)
         try:
             actor = validate_actor(actor)
             key = validate_idempotency_key(key, required=True)
@@ -402,7 +444,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                     runtime,
                     command,
                     actor,
-                    request.state.request_id,
+                    request_id,
                     failure,
                 )
                 raise failure
@@ -413,7 +455,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
 
         def execute() -> dict[str, Any]:
             reservation = runtime.repository.reserve_remote_command(
-                request_id=request.state.request_id,
+                request_id=request_id,
                 idempotency_key=key,
                 fingerprint=fingerprint,
                 command=command,
@@ -461,7 +503,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                     actor,
                     {
                         "command": command,
-                        "request_id": request.state.request_id,
+                        "request_id": request_id,
                         "calibration_id": payload.get("calibration_id", ""),
                     },
                 )
@@ -475,7 +517,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                         runtime, key, fingerprint, failure
                     )
                     _audit_calibration_result(
-                        runtime, command, actor, request.state.request_id, failure
+                        runtime, command, actor, request_id, failure
                     )
                     raise failure from exc
                 except ValueError as exc:
@@ -484,7 +526,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                         runtime, key, fingerprint, failure
                     )
                     _audit_calibration_result(
-                        runtime, command, actor, request.state.request_id, failure
+                        runtime, command, actor, request_id, failure
                     )
                     raise failure from exc
                 except ProtectedStateError as exc:
@@ -497,7 +539,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                         runtime, key, fingerprint, failure
                     )
                     _audit_calibration_result(
-                        runtime, command, actor, request.state.request_id, failure
+                        runtime, command, actor, request_id, failure
                     )
                     raise failure from exc
                 except TimeoutError as exc:
@@ -508,7 +550,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                         runtime, key, fingerprint, failure
                     )
                     _audit_calibration_result(
-                        runtime, command, actor, request.state.request_id, failure
+                        runtime, command, actor, request_id, failure
                     )
                     raise failure from exc
                 except RuntimeError as exc:
@@ -534,7 +576,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                         runtime, key, fingerprint, failure
                     )
                     _audit_calibration_result(
-                        runtime, command, actor, request.state.request_id, failure
+                        runtime, command, actor, request_id, failure
                     )
                     raise failure from exc
                 except Exception as exc:
@@ -550,7 +592,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                         runtime,
                         command,
                         actor,
-                        request.state.request_id,
+                        request_id,
                         ApiFailure(
                             500,
                             "calibration_reconciliation_required",
@@ -566,7 +608,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
                     response=response,
                 )
                 _audit_calibration_result(
-                    runtime, command, actor, request.state.request_id, None
+                    runtime, command, actor, request_id, None
                 )
                 return response
 
@@ -746,7 +788,7 @@ def create_app(runtime, control, engine, settings) -> FastAPI:
 
 
 def _error(status: int, code: str, message: str, request_id: str) -> JSONResponse:
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status,
         content={
             "error": {
@@ -756,6 +798,9 @@ def _error(status: int, code: str, message: str, request_id: str) -> JSONRespons
             }
         },
     )
+    # Self-contained so early middleware returns and ServerErrorMiddleware
+    # responses carry the same headers as every other response.
+    return _finalize_headers(response, request_id)
 
 
 def _map_command_failure(exc: RemoteCommandFailure) -> ApiFailure:

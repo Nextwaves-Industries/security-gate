@@ -55,6 +55,12 @@ def main() -> None:
         "MQTT_CA_SECRET_FILE",
         "REST_HOST_PORT",
         "GRPC_HOST_PORT",
+        "REST_BIND_IP",
+        "GRPC_BIND_IP",
+        "GATE_MEM_LIMIT",
+        "GATE_CPUS",
+        "LOG_MAX_SIZE",
+        "LOG_MAX_FILE",
     } & set(environment)
     if leaked_host_variables:
         fail(f"host-only variables leaked into the container: {sorted(leaked_host_variables)}")
@@ -83,10 +89,10 @@ def main() -> None:
         for item in service.get("devices", [])
     }
     if device_targets != {
-        "/dev/rfid-reader": "rwm",
-        "/dev/rfid-sensor": "rwm",
+        "/dev/rfid-reader": "rw",
+        "/dev/rfid-sensor": "rw",
     }:
-        fail("NR155 reader/sensor device mappings changed")
+        fail("NR155 reader/sensor device mappings changed (expected rw, no mknod)")
 
     if service.get("read_only") is not True:
         fail("root filesystem must be read-only")
@@ -96,6 +102,14 @@ def main() -> None:
         fail("all Linux capabilities must be dropped")
     if "no-new-privileges:true" not in service.get("security_opt", []):
         fail("no-new-privileges must be enabled")
+    if service.get("init") is not True:
+        fail("init: true must remain enabled for signal forwarding and reaping")
+    if not service.get("pids_limit"):
+        fail("pids_limit must be set")
+    if not service.get("mem_limit") and not (
+        service.get("deploy", {}).get("resources", {}).get("limits", {}).get("memory")
+    ):
+        fail("a memory limit must be set")
     if service.get("restart") != "unless-stopped":
         fail("restart policy must remain unless-stopped")
     if service.get("stop_grace_period") != "30s":

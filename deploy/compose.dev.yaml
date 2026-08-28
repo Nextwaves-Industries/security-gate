@@ -1,0 +1,139 @@
+# Local development / qualification stack.
+#
+# NOT for customer gates. Use deploy/compose.yaml (digest-pinned, contract
+# verified in CI) for production. This file:
+#   - runs a local Mosquitto MQTT 5 broker with TLS + password auth
+#   - builds (or uses) the gate-service image with the same runtime env
+#     allowlist and file-secret layout as production
+#   - makes the NR155 USB devices optional so the API/MQTT plane can be
+#     exercised on a laptop; without hardware /readyz stays 503 by design.
+#
+# Bootstrap once:   sh deploy/dev/bootstrap-dev-secrets.sh
+# Start:            docker compose -f deploy/compose.dev.yaml up --build -d
+# Follow logs:      docker compose -f deploy/compose.dev.yaml logs -f gate-service
+# Stop + wipe:      docker compose -f deploy/compose.dev.yaml down -v
+
+name: nextwaves-gate-dev
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    container_name: nextwaves-dev-mosquitto
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8883:8883"
+    volumes:
+      - ./dev/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./dev/secrets/mosquitto_passwd:/mosquitto/config/passwd:ro
+      - ./dev/secrets/mqtt_password:/mosquitto/config/mqtt_password:ro
+      - ./dev/secrets/dev_ca.pem:/mosquitto/certs/ca.pem:ro
+      - ./dev/secrets/mqtt_cert.pem:/mosquitto/certs/server.pem:ro
+      - ./dev/secrets/mqtt_key.pem:/mosquitto/certs/server.key:ro
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mosquitto_sub -h 127.0.0.1 -p 8883 --cafile /mosquitto/certs/ca.pem -u gate-dev -P "$$(cat /mosquitto/config/mqtt_password)" -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  gate-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: "${GATE_IMAGE:-rfid-portal-gate-service:dev}"
+    container_name: "nextwaves-${GATE_ID:-GATE-DEV}"
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      GATE_ID: "${GATE_ID:-GATE-DEV}"
+      RFID_READER_MODULE: "${RFID_READER_MODULE:-ZK}"
+      READER_DEVICE: /dev/rfid-reader
+      SENSOR_DEVICE: /dev/rfid-sensor
+      RFID_PORTAL_DATA_DIR: /var/lib/nextwaves
+      REST_PORT: "8443"
+      GRPC_PORT: "50051"
+      API_TOKEN_FILE: /run/secrets/api_token
+      TLS_CERT_FILE: /run/secrets/tls_cert
+      TLS_KEY_FILE: /run/secrets/tls_key
+      CALIBRATION_KEY_FILE: /run/secrets/calibration_root_key
+      MQTT_PASSWORD_FILE: /run/secrets/mqtt_password
+      MQTT_CA_FILE: /run/secrets/mqtt_ca
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_USERNAME: gate-dev
+      MQTT_CLIENT_ID: ""
+      COMMAND_TIMEOUT_S: "${COMMAND_TIMEOUT_S:-10}"
+      MAX_BODY_BYTES: "${MAX_BODY_BYTES:-1048576}"
+      DATABASE_BACKUP_RETENTION: "${DATABASE_BACKUP_RETENTION:-3}"
+      # /docs and unauthenticated /openapi.json are enabled in dev only.
+      GATE_DEVELOPMENT: "${GATE_DEVELOPMENT:-true}"
+      # DEBUG shows MQTT connect/publish/outbox tracing from the runtime.
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      GATE_ALLOW_INSECURE: "false"
+    devices:
+      # Point these at /dev/serial/by-id/...-if00 / -if02 when an NR155 is
+      # attached. Defaults keep the container startable without hardware.
+      - "${READER_DEVICE:-/dev/null}:/dev/rfid-reader:rw"
+      - "${SENSOR_DEVICE:-/dev/null}:/dev/rfid-sensor:rw"
+    group_add:
+      - "${DIALOUT_GID:-20}"
+    ports:
+      - "127.0.0.1:${REST_HOST_PORT:-8443}:8443"
+      - "127.0.0.1:${GRPC_HOST_PORT:-50051}:50051"
+    volumes:
+      - gate-data:/var/lib/nextwaves
+    secrets:
+      - api_token
+      - tls_cert
+      - tls_key
+      - calibration_root_key
+      - mqtt_password
+      - mqtt_ca
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    pids_limit: 256
+    mem_limit: "${GATE_MEM_LIMIT:-1g}"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import ssl,urllib.request; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=c,timeout=2).read()"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  gate-data:
+  mosquitto-data:
+
+secrets:
+  api_token:
+    file: ./dev/secrets/api_token
+  tls_cert:
+    file: ./dev/secrets/tls_cert.pem
+  tls_key:
+    file: ./dev/secrets/tls_key.pem
+  calibration_root_key:
+    file: ./dev/secrets/calibration_root_key
+  mqtt_password:
+    file: ./dev/secrets/mqtt_password
+  mqtt_ca:
+    file: ./dev/secrets/dev_ca.pem

@@ -52,7 +52,49 @@ jobs:
           python scripts/verify_compose_contract.py "${resolved}" \
             --rest-host-port 8443 \
             --grpc-host-port 50051
-          sh -n deploy/wait-for-devices.sh deploy/validate-running.sh
+          sh -n deploy/wait-for-devices.sh deploy/validate-running.sh \
+            deploy/dev/bootstrap-dev-secrets.sh
+
+      - name: Lint repository text (no em/en dashes, no CRLF, no trailing whitespace)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r f; do
+            case "$f" in *.so|*.png|*.jpg|*.webp|PRODUCT_SHA256SUMS) continue ;; esac
+            if grep -nP '[\x{2013}\x{2014}]' "$f"; then echo "::error file=$f::em/en dash found"; bad=1; fi
+            if grep -nP '\r$' "$f"; then echo "::error file=$f::CRLF line ending"; bad=1; fi
+            if grep -nP '[ \t]+$' "$f"; then echo "::error file=$f::trailing whitespace"; bad=1; fi
+          done < <(git ls-files)
+          exit $bad
+
+      - name: Unit-test plaintext transport adapters
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet -r tests/requirements-test.txt
+          PYTHONDONTWRITEBYTECODE=1 python -B -m pytest -p no:cacheprovider -q tests
+          # verify_product.py forbids cache directories in the product tree.
+          if find tests runtime \( -name __pycache__ -o -name .pytest_cache \) | grep -q .; then
+            echo "pytest left cache directories behind" >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: examples/gate-console/package-lock.json
+
+      - name: Build example gate console
+        shell: bash
+        working-directory: examples/gate-console
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run build
+          rm -rf node_modules dist
 
       - name: Validate version and release tag
         id: version

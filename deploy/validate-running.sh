@@ -88,8 +88,16 @@ if [ -n "${GATE_API_URL:-}" ]; then
   api_url=$GATE_API_URL
 else
   case "${REST_BIND_IP:-127.0.0.1}" in
-    0.0.0.0|127.0.0.1) api_host=127.0.0.1 ;;
+    0.0.0.0|::|'[::]'|'')
+      echo "REST_BIND_IP must be loopback or a dedicated VLAN/VPN address, not a wildcard" >&2
+      exit 1 ;;
+    127.0.0.1) api_host=127.0.0.1 ;;
     *) api_host=$REST_BIND_IP ;;
+  esac
+  case "${GRPC_BIND_IP:-127.0.0.1}" in
+    0.0.0.0|::|'[::]'|'')
+      echo "GRPC_BIND_IP must be loopback or a dedicated VLAN/VPN address, not a wildcard" >&2
+      exit 1 ;;
   esac
   api_url="https://${api_host}:${REST_HOST_PORT:-8443}"
 fi

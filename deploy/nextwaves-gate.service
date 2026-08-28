@@ -2,8 +2,8 @@
 Description=Nextwaves RFID Gate Service
 Requires=docker.service
 After=docker.service
-StartLimitIntervalSec=120
-StartLimitBurst=10
+# Restart behaviour is owned by Docker (restart: unless-stopped in compose.yaml);
+# this oneshot unit only brings the Compose project up and down.
 
 [Service]
 Type=oneshot

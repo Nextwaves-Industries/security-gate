@@ -43,5 +43,5 @@ WORKDIR /opt/nextwaves
 EXPOSE 8443 50051
 VOLUME ["/var/lib/nextwaves"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
-  CMD python -c "import ssl,urllib.request; c=ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=c,timeout=2).read()"
+  CMD python -c "import ssl,urllib.request; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=c,timeout=2).read()"
 ENTRYPOINT ["python", "-m", "gate_service.main"]
