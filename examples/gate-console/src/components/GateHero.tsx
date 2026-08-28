@@ -3,8 +3,8 @@ import type { GateStatus } from "../api";
 // Isometric render of one NR155 portal lane. Flat-shaded faces only.
 const C = 0.866;
 const S = 0.5;
-const OX = 300;
-const OY = 118;
+const OX = 268;
+const OY = 212;
 type P = [number, number, number];
 const iso = ([x, y, z]: P) => [OX + (x - y) * C, OY + (x + y) * S - z] as const;
 const poly = (pts: P[]) => pts.map((p) => iso(p).join(",")).join(" ");
@@ -59,18 +59,18 @@ export default function GateHero({ status, antennas }: { status: GateStatus | nu
   const beamB = iso([254, 20, 92]);
 
   return (
-    <svg viewBox="0 0 600 330" role="img" aria-label="Portal render">
+    <svg viewBox="0 0 640 450" role="img" aria-label="Portal render">
       {/* floor */}
-      <polygon points={poly([[-90, -110, 0], [390, -110, 0], [390, 150, 0], [-90, 150, 0]])} fill="#0b0b0b" />
-      <polygon points={poly([[46, -110, 0.2], [254, -110, 0.2], [254, 150, 0.2], [46, 150, 0.2]])} fill="#101010" />
+      <polygon points={poly([[-40, -80, 0], [340, -80, 0], [340, 120, 0], [-40, 120, 0]])} fill="#0b0b0b" />
+      <polygon points={poly([[46, -80, 0.2], [254, -80, 0.2], [254, 120, 0.2], [46, 120, 0.2]])} fill="#101010" />
       {/* contact shadows */}
       <polygon points={poly([[-6, -6, 0.3], [52, -6, 0.3], [52, 52, 0.3], [-6, 52, 0.3]])} fill="#050505" />
       <polygon points={poly([[254, -6, 0.3], [312, -6, 0.3], [312, 52, 0.3], [254, 52, 0.3]])} fill="#050505" />
       {/* direction */}
       {running && (
         <g fill="#3e6ae1">
-          <polygon points={poly([[144, 120, 0.5], [156, 120, 0.5], [156, -40, 0.5], [144, -40, 0.5]])} opacity="0.9" />
-          <polygon points={poly([[130, -40, 0.5], [170, -40, 0.5], [150, -72, 0.5]])} />
+          <polygon points={poly([[144, 100, 0.5], [156, 100, 0.5], [156, -30, 0.5], [144, -30, 0.5]])} opacity="0.9" />
+          <polygon points={poly([[130, -30, 0.5], [170, -30, 0.5], [150, -62, 0.5]])} />
         </g>
       )}
       {/* pillars */}
@@ -88,8 +88,8 @@ export default function GateHero({ status, antennas }: { status: GateStatus | nu
       <Box x={254} y={16} z={88} w={6} d={8} h={8} top={sensor ? "#f2f2f2" : "#3a3a3a"} front={sensor ? "#d9d9d9" : "#262626"} side={sensor ? "#e6e6e6" : "#2f2f2f"} />
       {/* antenna labels */}
       {[
-        { p: [20, 48, H + 10] as P, t: "A1 A2", on: reader && (antennas[0] || antennas[1]) },
-        { p: [280, 48, H + 10] as P, t: "A3 A4", on: reader && (antennas[2] || antennas[3]) },
+        { p: [20, 72, 0] as P, t: "A1 A2", on: reader && (antennas[0] || antennas[1]) },
+        { p: [280, 72, 0] as P, t: "A3 A4", on: reader && (antennas[2] || antennas[3]) },
       ].map(({ p, t, on }) => {
         const [x, y] = iso(p);
         return (

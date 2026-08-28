@@ -130,7 +130,7 @@ code,
   position: relative;
 }
 .hero svg {
-  width: min(100%, 600px);
+  width: min(100%, 520px);
   height: auto;
   display: block;
   margin: 0 auto;
