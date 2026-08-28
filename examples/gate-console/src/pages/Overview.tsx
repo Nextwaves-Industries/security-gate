@@ -28,6 +28,22 @@ export default function Overview({
   const [cancelReason, setCancelReason] = useState("");
 
   const running = status?.inventory?.running ?? false;
+  const [showDiagram, setShowDiagram] = useState(() => {
+    try {
+      return localStorage.getItem("gate-console.diagram") !== "hidden";
+    } catch {
+      return true;
+    }
+  });
+  const toggleDiagram = () => {
+    const next = !showDiagram;
+    setShowDiagram(next);
+    try {
+      localStorage.setItem("gate-console.diagram", next ? "shown" : "hidden");
+    } catch {
+      /* ignore */
+    }
+  };
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -44,7 +60,15 @@ export default function Overview({
 
   return (
     <>
-      <GateHero status={status} antennas={antennas} />
+      <div className="hero">
+        <div className="hero-head">
+          <span>Portal</span>
+          <button className="link" onClick={toggleDiagram}>
+            {showDiagram ? "Hide diagram" : "Show diagram"}
+          </button>
+        </div>
+        {showDiagram && <GateHero status={status} antennas={antennas} />}
+      </div>
 
       <div className="hero-actions">
         <button disabled={busy || running || !status?.ready} onClick={() => setShowStart((v) => !v)}>
