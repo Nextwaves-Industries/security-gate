@@ -58,6 +58,7 @@ export default function App() {
 
   const headline = status ? (status.ready ? "Ready" : titleCase(status.state)) : error ? "Unreachable" : "Connecting";
   const tone = status ? (status.ready ? "ok" : "warn") : error ? "bad" : "";
+  const toneLabel = status ? (status.ready ? "OK" : "NOT READY") : error ? "OFFLINE" : "";
 
   return (
     <div className="shell">
@@ -69,7 +70,7 @@ export default function App() {
           </div>
           <h1 className="headline">
             {headline}
-            <span className={`dot ${tone}`} />
+            {toneLabel && <span className={`pill ${tone}`}>{toneLabel}</span>}
           </h1>
           {error && (
             <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 6 }}>

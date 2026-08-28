@@ -20,7 +20,7 @@ export function Tile({
     <div className="tile">
       <h4>
         {title}
-        {tone && <span className={`dot ${tone}`} />}
+        {tone && <span className={`pill ${tone}`}>{tone === "ok" ? "OK" : tone === "warn" ? "ATTENTION" : "FAULT"}</span>}
       </h4>
       <div>
         <div className="big">

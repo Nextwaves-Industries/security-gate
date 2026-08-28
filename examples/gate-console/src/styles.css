@@ -81,24 +81,6 @@ code,
   gap: 10px;
   margin: 4px 0 0;
 }
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--dim);
-  display: inline-block;
-  flex: none;
-}
-.dot.ok {
-  background: var(--ok);
-}
-.dot.warn {
-  background: var(--warn);
-}
-.dot.bad {
-  background: var(--bad);
-}
-
 .nav {
   position: fixed;
   left: 0;
@@ -478,7 +460,6 @@ button.row:hover {
 .timeline .tdot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
   background: var(--bad);
   align-self: center;
 }

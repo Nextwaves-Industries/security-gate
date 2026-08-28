@@ -56,7 +56,7 @@ export default function Calibration({
       <div className="tiles">
         <div className="tile">
           <h4>
-            State <span className={`dot ${cal?.valid ? "ok" : "warn"}`} />
+            State <span className={`pill ${cal?.valid ? "ok" : "warn"}`}>{cal?.valid ? "OK" : "ATTENTION"}</span>
           </h4>
           <div>
             <div className="big">{titleCase(cal?.state)}</div>
