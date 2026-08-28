@@ -45,7 +45,7 @@ export default function Transactions({ api, notify }: { api: GateApi; notify: (m
             icon={<Layers />}
             title={t.reference || t.transaction_id}
             sub={`${t.operation ?? ""} · ${fmtTime(t.updated_at ?? t.created_at)}`}
-            right={<span className={`pill ${pillTone(t.status)}`}>{t.status}</span>}
+            right={<span className={`state ${pillTone(t.status)}`}>{t.status}</span>}
             onClick={() => setSelected(t.transaction_id)}
           />
         ))}

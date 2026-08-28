@@ -62,7 +62,6 @@ export default function Overview({
     <>
       <div className="hero">
         <div className="hero-head">
-          <span>Portal</span>
           <button className="link" onClick={toggleDiagram}>
             {showDiagram ? "Hide diagram" : "Show diagram"}
           </button>
@@ -183,26 +182,26 @@ export default function Overview({
           icon={<Antenna />}
           title="Reader"
           sub={status?.reader.message || status?.reader.device}
-          right={<span className={`pill ${status?.reader.connected ? "ok" : "bad"}`}>{status?.reader.connected ? "Connected" : "Offline"}</span>}
+          right={<span className={`state ${status?.reader.connected ? "ok" : "bad"}`}>{status?.reader.connected ? "Connected" : "Offline"}</span>}
         />
         <Row
           icon={<Beam />}
           title="Sensor"
           sub={status?.sensor.message || status?.sensor.device}
-          right={<span className={`pill ${status?.sensor.connected ? "ok" : "bad"}`}>{status?.sensor.connected ? "Connected" : "Offline"}</span>}
+          right={<span className={`state ${status?.sensor.connected ? "ok" : "bad"}`}>{status?.sensor.connected ? "Connected" : "Offline"}</span>}
         />
         <Row
           icon={<Brain />}
           title="Detection model"
           sub={status?.model ? `${status.model.version} (configured ${status.model.configured_version})` : "-"}
-          right={<span className={`pill ${status?.model?.available ? "ok" : "bad"}`}>{status?.model?.available ? "Loaded" : "Missing"}</span>}
+          right={<span className={`state ${status?.model?.available ? "ok" : "bad"}`}>{status?.model?.available ? "Loaded" : "Missing"}</span>}
         />
         <Row
           icon={<Target />}
           title="Calibration"
           sub={status?.calibration?.reason || status?.calibration?.profile_state}
           right={
-            <span className={`pill ${status?.calibration?.valid ? "ok" : "warn"}`}>
+            <span className={`state ${status?.calibration?.valid ? "ok" : "warn"}`}>
               {titleCase(status?.calibration?.state)}
             </span>
           }

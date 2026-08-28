@@ -56,7 +56,7 @@ export default function Calibration({
       <div className="tiles">
         <div className="tile">
           <h4>
-            State <span className={`pill ${cal?.valid ? "ok" : "warn"}`}>{cal?.valid ? "OK" : "ATTENTION"}</span>
+            State <span className={`state ${cal?.valid ? "ok" : "warn"}`}>{cal?.valid ? "OK" : "ATTENTION"}</span>
           </h4>
           <div>
             <div className="big">{titleCase(cal?.state)}</div>
@@ -169,7 +169,7 @@ export default function Calibration({
             icon={<Target />}
             title={r.calibration_id}
             sub={`${r.notes ?? ""} · ${fmtTime(r.updated_at ?? r.created_at)}`}
-            right={<span className="pill">{r.status}</span>}
+            right={<span className="state">{r.status}</span>}
             onClick={() => setActive(r.calibration_id)}
           />
         ))}

@@ -70,12 +70,10 @@ export default function App() {
           </div>
           <h1 className="headline">
             {headline}
-            {toneLabel && <span className={`pill ${tone}`}>{toneLabel}</span>}
+            {toneLabel && <span className={`state ${tone}`}>{toneLabel}</span>}
           </h1>
           {error && (
-            <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 6 }}>
-              {error} - check the token and gate URL under Config.
-            </div>
+            <div className="sub-note">{error}. Set the token and gate URL under Config.</div>
           )}
         </div>
       </header>
