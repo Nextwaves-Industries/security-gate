@@ -12,7 +12,6 @@ export default function Calibration({
   status: GateStatus | null;
   notify: (m: string, bad?: boolean) => void;
 }) {
-  const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
   const [runs, setRuns] = useState<CalibrationRun[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,11 +23,9 @@ export default function Calibration({
   const [reason, setReason] = useState("");
 
   const load = useCallback(() => {
-    Promise.all([api.calibration(), api.calibrationRuns(50)])
-      .then(([s, r]) => {
-        setSummary(s);
-        setRuns(r.items);
-      })
+    api
+      .calibrationRuns(50)
+      .then((r) => setRuns(r.items))
       .catch((e) => notify(`Calibration: ${(e as Error).message}`, true));
   }, [api, notify]);
 
@@ -66,7 +63,7 @@ export default function Calibration({
         <div className="tile">
           <h4>Passes / direction</h4>
           <div className="big">{req.min_passes_per_direction ?? "-"}</div>
-          <div className="sub">required minimum</div>
+          <div className="sub">Required</div>
         </div>
         <div className="tile">
           <h4>Background</h4>
@@ -74,22 +71,22 @@ export default function Calibration({
             {req.min_background_duration_s ?? "-"}
             <small>s</small>
           </div>
-          <div className="sub">{req.min_background_reads ?? "-"} reads minimum</div>
+          <div className="sub">{req.min_background_reads ?? "-"} reads</div>
         </div>
       </div>
 
       <div className="section-title">Commissioning</div>
       <div className="panel">
         <Field label="Active run">
-          <input value={active ?? ""} onChange={(e) => setActive(e.target.value || null)} placeholder="calibration_id" />
+          <input value={active ?? ""} onChange={(e) => setActive(e.target.value || null)} placeholder="Select a run below" />
         </Field>
         <div className="grid-2">
           <div>
             <Field label="Notes">
-              <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="site commissioning" />
+              <input value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>
             <button className="btn primary block" disabled={busy} onClick={() => run("Start", () => api.startCalibration(notes))}>
-              1 · Start new run
+              Start run
             </button>
           </div>
           <div>
@@ -101,7 +98,7 @@ export default function Calibration({
               disabled={busy || !active}
               onClick={() => run("Background", () => api.calibrationBackground(active!, duration))}
             >
-              2 · Capture background
+              Capture background
             </button>
           </div>
         </div>
@@ -121,7 +118,7 @@ export default function Calibration({
             <input type="number" min={1} max={300} value={timeout} onChange={(e) => setTimeoutS(Number(e.target.value))} />
           </Field>
         </div>
-        <Field label="Expected EPCs on the pallet (one per line)">
+        <Field label="Expected EPCs">
           <textarea rows={3} value={epcs} onChange={(e) => setEpcs(e.target.value)} />
         </Field>
         <button
@@ -138,23 +135,23 @@ export default function Calibration({
             )
           }
         >
-          3 · Record labelled pass
+          Record pass
         </button>
         <div style={{ height: 12 }} />
         <div className="grid-2">
           <button className="btn primary block" disabled={busy || !active} onClick={() => run("Evaluate", () => api.evaluateCalibration(active!))}>
-            4 · Evaluate
+            Evaluate
           </button>
           <div>
             <Field label="Abort reason">
-              <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="wrong tags" />
+              <input value={reason} onChange={(e) => setReason(e.target.value)} />
             </Field>
             <button
               className="btn danger block"
               disabled={busy || !active || reason.trim().length < 3}
               onClick={() => run("Abort", () => api.abortCalibration(active!, reason))}
             >
-              Abort run
+              Abort
             </button>
           </div>
         </div>
@@ -175,12 +172,6 @@ export default function Calibration({
         ))}
       </div>
 
-      {summary && (
-        <>
-          <div className="section-title">Raw calibration status</div>
-          <pre className="json">{JSON.stringify(summary, null, 2)}</pre>
-        </>
-      )}
     </>
   );
 }

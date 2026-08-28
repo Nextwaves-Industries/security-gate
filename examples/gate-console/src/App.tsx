@@ -96,7 +96,6 @@ export default function App() {
           onSave={(s) => {
             saveSettings(s);
             setSettings(s);
-            notify("Settings saved");
           }}
         />
       )}

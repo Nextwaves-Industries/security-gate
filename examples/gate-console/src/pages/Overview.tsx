@@ -25,7 +25,6 @@ export default function Overview({
   const [operation, setOperation] = useState<"INBOUND" | "OUTBOUND">("INBOUND");
   const [epcs, setEpcs] = useState("");
   const [antennas, setAntennas] = useState(DEFAULT_ANTENNAS);
-  const [cancelReason, setCancelReason] = useState("");
 
   const running = status?.inventory?.running ?? false;
   const [showDiagram, setShowDiagram] = useState(() => {
@@ -85,8 +84,7 @@ export default function Overview({
         <button
           disabled={busy || !running}
           onClick={() => {
-            const reason = cancelReason || "operator cancel";
-            run("Cancel", () => api.cancelTransaction(reason));
+            run("Cancel", () => api.cancelTransaction("Cancelled by operator"));
           }}
         >
           <Cross />
@@ -97,7 +95,7 @@ export default function Overview({
       {showStart && !running && (
         <div className="panel">
           <div className="grid-2">
-            <Field label="Reference (ASN / order)">
+            <Field label="Reference">
               <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="ASN-100" />
             </Field>
             <Field label="Operation">
@@ -111,7 +109,7 @@ export default function Overview({
               />
             </Field>
           </div>
-          <Field label="Expected EPCs (one per line, optional)">
+          <Field label="Expected EPCs">
             <textarea rows={3} value={epcs} onChange={(e) => setEpcs(e.target.value)} placeholder="E2000017…" />
           </Field>
           <Field label="Antennas">
@@ -126,9 +124,6 @@ export default function Overview({
                 </button>
               ))}
             </div>
-          </Field>
-          <Field label="Cancel reason (used by the Cancel action)">
-            <input value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} placeholder="operator cancel" />
           </Field>
           <button
             className="btn primary block"
@@ -158,7 +153,7 @@ export default function Overview({
         <Tile
           title="Readiness"
           value={status ? (status.ready ? "Ready" : titleCase(status.state)) : "-"}
-          sub={status?.last_error || (status?.ready ? "All subsystems nominal" : "See subsystems below")}
+          sub={status?.last_error || (status?.ready ? "All systems normal" : "")}
           tone={status ? (status.ready ? "ok" : "warn") : undefined}
         />
         <Tile
@@ -171,7 +166,7 @@ export default function Overview({
           title="Poll latency"
           value={history.length ? Math.round(history[history.length - 1]) : "-"}
           unit="ms"
-          sub="status endpoint, last 60 polls"
+          sub="Last 60 polls"
           spark={history}
         />
       </div>
