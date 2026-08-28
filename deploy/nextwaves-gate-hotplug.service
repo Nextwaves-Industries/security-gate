@@ -1,0 +1,8 @@
+[Unit]
+Description=Start or restart Nextwaves gate after NR155 USB enumeration
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl reset-failed nextwaves-gate.service
+ExecStart=/bin/systemctl restart nextwaves-gate.service

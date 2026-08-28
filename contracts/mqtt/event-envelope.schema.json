@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nextwaves.example/rfid-portal/mqtt/v1/event-envelope.schema.json",
+  "title": "RFID Portal MQTT SDK event envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "gate_id",
+    "correlation_id",
+    "data"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "event_type": { "type": "string", "minLength": 3, "maxLength": 128 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "gate_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "correlation_id": { "type": "string", "maxLength": 128 },
+    "data": { "type": "object" }
+  }
+}

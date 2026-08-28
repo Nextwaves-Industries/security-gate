@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!requirements-headless.txt
+!runtime/
+!runtime/**
+**/__pycache__/
+**/*.py[cod]

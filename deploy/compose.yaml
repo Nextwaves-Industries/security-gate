@@ -1,0 +1,86 @@
+services:
+  gate-service:
+    image: "${GATE_IMAGE:?Set GATE_IMAGE to an immutable sha256 digest}"
+    container_name: "nextwaves-${GATE_ID:-GATE-01}"
+    restart: unless-stopped
+    environment:
+      # gate.env is used only for Compose interpolation. Pass the minimal
+      # allowlist needed by the runtime instead of host-only secret paths.
+      GATE_ID: "${GATE_ID:?Set GATE_ID}"
+      RFID_READER_MODULE: "${RFID_READER_MODULE:-ZK}"
+      READER_DEVICE: /dev/rfid-reader
+      SENSOR_DEVICE: /dev/rfid-sensor
+      RFID_PORTAL_DATA_DIR: /var/lib/nextwaves
+      # Service ports are compatibility boundaries inside the container. The
+      # independently configurable host-side ports are declared below.
+      REST_PORT: "8443"
+      GRPC_PORT: "50051"
+      API_TOKEN_FILE: /run/secrets/api_token
+      TLS_CERT_FILE: /run/secrets/tls_cert
+      TLS_KEY_FILE: /run/secrets/tls_key
+      CALIBRATION_KEY_FILE: /run/secrets/calibration_root_key
+      MQTT_PASSWORD_FILE: /run/secrets/mqtt_password
+      MQTT_CA_FILE: /run/secrets/mqtt_ca
+      MQTT_HOST: "${MQTT_HOST:?Set MQTT_HOST}"
+      MQTT_PORT: "${MQTT_PORT:-8883}"
+      MQTT_USERNAME: "${MQTT_USERNAME:?Set MQTT_USERNAME}"
+      MQTT_CLIENT_ID: "${MQTT_CLIENT_ID:-}"
+      COMMAND_TIMEOUT_S: "${COMMAND_TIMEOUT_S:-10}"
+      MAX_BODY_BYTES: "${MAX_BODY_BYTES:-1048576}"
+      DATABASE_BACKUP_RETENTION: "${DATABASE_BACKUP_RETENTION:-10}"
+      GATE_DEVELOPMENT: "false"
+      GATE_ALLOW_INSECURE: "false"
+    devices:
+      - "${READER_DEVICE}:/dev/rfid-reader:rwm"
+      - "${SENSOR_DEVICE}:/dev/rfid-sensor:rwm"
+    group_add:
+      - "${DIALOUT_GID}"
+    ports:
+      - "${REST_BIND_IP:-127.0.0.1}:${REST_HOST_PORT:-8443}:8443"
+      - "${GRPC_BIND_IP:-127.0.0.1}:${GRPC_HOST_PORT:-50051}:50051"
+    volumes:
+      - "${GATE_DATA_DIR:-./data}:/var/lib/nextwaves"
+    secrets:
+      - api_token
+      - tls_cert
+      - tls_key
+      - calibration_root_key
+      - mqtt_password
+      - mqtt_ca
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILE:-5}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import ssl,urllib.request; c=ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/healthz',context=c,timeout=2).read()"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  api_token:
+    file: "${API_TOKEN_SECRET_FILE}"
+  tls_cert:
+    file: "${TLS_CERT_SECRET_FILE}"
+  tls_key:
+    file: "${TLS_KEY_SECRET_FILE}"
+  calibration_root_key:
+    file: "${CALIBRATION_KEY_SECRET_FILE}"
+  mqtt_password:
+    file: "${MQTT_PASSWORD_SECRET_FILE}"
+  mqtt_ca:
+    file: "${MQTT_CA_SECRET_FILE}"

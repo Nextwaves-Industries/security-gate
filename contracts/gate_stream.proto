@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package nextwaves.gate.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+service GateStreamService {
+  rpc GetStatus(GetStatusRequest) returns (GateStatus);
+  rpc WatchEvents(WatchEventsRequest) returns (stream GateEvent);
+}
+
+message GetStatusRequest {}
+
+message WatchEventsRequest {
+  repeated string event_type = 1;
+}
+
+message GateStatus {
+  string gate_id = 1;
+  string state = 2;
+  bool ready = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  google.protobuf.Struct details = 5;
+}
+
+message GateEvent {
+  string schema_version = 1;
+  string event_id = 2;
+  string event_type = 3;
+  google.protobuf.Timestamp occurred_at = 4;
+  string gate_id = 5;
+  string correlation_id = 6;
+  google.protobuf.Struct data = 7;
+}
